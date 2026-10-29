@@ -467,6 +467,7 @@ func cmdReport(args []string) {
 	fs := flag.NewFlagSet("report", flag.ExitOnError)
 	in := fs.String("in", statePath(config.DefaultConfigDir()), "输入 state.json")
 	out := fs.String("out", filepath.Join(config.DefaultConfigDir(), "report.html"), "输出 html")
+	cfgPath := fs.String("config", config.DefaultConfigPath(), "配置文件(用于计算 diff, 可选)")
 	fs.Parse(args)
 	data, err := os.ReadFile(*in)
 	if err != nil {
@@ -476,11 +477,24 @@ func cmdReport(args []string) {
 	if err := json.Unmarshal(data, &st); err != nil {
 		fatal("解析 state.json 失败: %v", err)
 	}
-	html := report.Generate(st)
+	// 若配置存在, 计算 配置 vs 线上 的可视化 diff
+	var diff []report.ZoneDiff
+	if c, err := config.LoadConfig(*cfgPath); err == nil {
+		diff = computeDiff(c, st)
+	}
+	d := report.ReportData{GeneratedAt: st.GeneratedAt, Zones: st.Zones, Diff: diff}
+	html := report.Generate(d)
 	if err := os.WriteFile(*out, []byte(html), 0o644); err != nil {
 		fatal("写 html 失败: %v", err)
 	}
 	fmt.Printf("已生成报告: %s\n", *out)
+	if diff == nil {
+		fmt.Println("(未找到 config.yaml, 未计算 diff; 有配置时报告会展示「变更预览」)")
+	} else if totalChanges(diff) == 0 {
+		fmt.Println("(配置与线上现状一致, 无待变更)")
+	} else {
+		fmt.Printf("(%d 项待变更, 见报告「变更预览」tab)\n", totalChanges(diff))
+	}
 }
 
 // ─────────────────────────── gen-config ───────────────────────────
@@ -596,7 +610,7 @@ func dryRunNote(d bool) string {
 	return ""
 }
 
-func sortedKeys(m map[string][]desiredRec) []string {
+func sortedKeys[T any](m map[string][]T) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {
 		ks = append(ks, k)
@@ -625,6 +639,102 @@ func differ(h cfapi.CfRecord, d cfapi.CfRecord) bool {
 		return true
 	}
 	return false
+}
+
+func proxyLabel(p bool) string {
+	if p {
+		return "橙云(Proxy)"
+	}
+	return "灰云(DNS)"
+}
+
+func totalChanges(zones []report.ZoneDiff) int {
+	n := 0
+	for _, z := range zones {
+		n += len(z.Changes)
+	}
+	return n
+}
+
+// computeDiff 比对 配置(期望) 与 线上现状, 返回可视化 diff (复用 apply 的判定逻辑)。
+// 仅覆盖默认 apply 会做的动作: zone SSL、记录新建/更新、按主机 SSL 增减。
+// 不展示删除(默认 apply 不带 --delete-extra)。
+func computeDiff(cfg *config.Config, st state.State) []report.ZoneDiff {
+	var out []report.ZoneDiff
+	liveByDomain := map[string]state.StateZone{}
+	for _, z := range st.Zones {
+		liveByDomain[z.Domain] = z
+	}
+	for _, zc := range cfg.Zones {
+		live, ok := liveByDomain[zc.Domain]
+		if !ok {
+			continue // 配置里的域名不在线上现状中, 跳过
+		}
+		zoneMode := cfapi.SSLMode(zc.SSL)
+		var ch []report.Change
+
+		// zone 级 SSL
+		if zoneMode != "" && live.SSL != "" && zoneMode != live.SSL {
+			ch = append(ch, report.Change{Action: "ssl-zone", Field: "Zone SSL", Old: live.SSL, New: zoneMode})
+		}
+
+		// 记录: 期望 vs 线上
+		desiredByKey := map[string][]cfapi.CfRecord{}
+		desiredHostSSL := map[string]string{}
+		for _, rc := range zc.Records {
+			if rc.SSL != "" {
+				if m := cfapi.SSLMode(rc.SSL); m != "" {
+					desiredHostSSL[config.Fqdn(rc.Name, zc.Domain)] = m
+				}
+			}
+			d, _ := config.NormalizeRecord(rc, zc.Domain, cfg.DefaultTTL)
+			key := strings.ToLower(d.Type + "\n" + d.Name)
+			desiredByKey[key] = append(desiredByKey[key], d)
+		}
+		liveByKey := map[string][]cfapi.CfRecord{}
+		for _, r := range live.Records {
+			key := strings.ToLower(r.Type + "\n" + r.Name)
+			liveByKey[key] = append(liveByKey[key], r)
+		}
+		for _, key := range sortedKeys(desiredByKey) {
+			wants := desiredByKey[key]
+			haves := liveByKey[key]
+			for i := range wants {
+				d := wants[i]
+				shortName := config.ShortName(d.Name, zc.Domain)
+				if i < len(haves) {
+					h := haves[i]
+					if h.Content != d.Content {
+						ch = append(ch, report.Change{Action: "update", Name: shortName, Type: d.Type, Field: "内容", Old: h.Content, New: d.Content})
+					}
+					if h.Proxied != d.Proxied {
+						ch = append(ch, report.Change{Action: "update", Name: shortName, Type: d.Type, Field: "代理", Old: proxyLabel(h.Proxied), New: proxyLabel(d.Proxied)})
+					}
+					if h.TTL != d.TTL && !(h.TTL == 1 || d.TTL == 1) {
+						ch = append(ch, report.Change{Action: "update", Name: shortName, Type: d.Type, Field: "TTL", Old: fmt.Sprint(h.TTL), New: fmt.Sprint(d.TTL)})
+					}
+				} else {
+					ch = append(ch, report.Change{Action: "create", Name: shortName, Type: d.Type, Field: "新建", Old: "-", New: d.Content + " · " + proxyLabel(d.Proxied)})
+				}
+			}
+		}
+
+		// 按主机 SSL
+		for host, mode := range desiredHostSSL {
+			if mode == zoneMode {
+				continue
+			}
+			liveMode := live.PerHostSSL[host]
+			if liveMode != mode {
+				ch = append(ch, report.Change{Action: "ssl-host", Name: config.ShortName(host, zc.Domain), Field: "按主机SSL", Old: liveMode, New: mode})
+			}
+		}
+
+		if len(ch) > 0 {
+			out = append(out, report.ZoneDiff{Domain: zc.Domain, Changes: ch})
+		}
+	}
+	return out
 }
 
 // hostFromExpr 从 Configuration Rule 表达式解析出主机名, 支持:
