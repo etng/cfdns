@@ -18,6 +18,13 @@ cfdns version
 
 构建产物是单文件二进制，直接丢到 `PATH`（如 `/usr/local/bin/`）即可，无需其他运行时。
 
+或通过 Homebrew（tap 仓库为 `homebrew-taps`，brew 识别为 `etng/taps`）：
+
+```bash
+brew install etng/taps/cfdns
+cfdns version
+```
+
 ---
 
 ## 目录约定
