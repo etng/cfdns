@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build universal macOS release
+    runs-on: macos-15
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Validate release tag and notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Expected a stable SemVer tag, got %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          notes_file=".github/release-notes/${RELEASE_TAG}.md"
+          if [ ! -f "$notes_file" ]; then
+            printf 'Missing user-facing release notes: %s\n' "$notes_file" >&2
+            exit 1
+          fi
+
+      - name: Build universal macOS binary
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version_value="${RELEASE_TAG#v}"
+          mkdir -p dist package
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-s -w -X main.version=${version_value}" \
+            -o dist/arm64/cfdns ./cmd/cfdns
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
+            -ldflags "-s -w -X main.version=${version_value}" \
+            -o dist/amd64/cfdns ./cmd/cfdns
+          lipo -create dist/arm64/cfdns dist/amd64/cfdns -output dist/cfdns-macos-universal
+          codesign --force --sign - dist/cfdns-macos-universal
+          chmod +x dist/cfdns-macos-universal
+
+          cp dist/cfdns-macos-universal package/cfdns
+          tar -czf "dist/cfdns-${RELEASE_TAG}-macos-universal.tar.gz" -C package cfdns
+
+          cd dist
+          shasum -a 256 \
+            cfdns-macos-universal \
+            "cfdns-${RELEASE_TAG}-macos-universal.tar.gz" \
+            > SHA256SUMS
+
+      - name: Verify packaged binary
+        run: |
+          file dist/cfdns-macos-universal | grep -q 'universal binary'
+          dist/cfdns-macos-universal version
+          codesign --verify --verbose=2 dist/cfdns-macos-universal
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          release_assets=(
+            dist/cfdns-macos-universal
+            "dist/cfdns-${RELEASE_TAG}-macos-universal.tar.gz"
+            dist/SHA256SUMS
+          )
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              "${release_assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft=false \
+              --title "cfdns ${RELEASE_TAG}" \
+              --notes-file ".github/release-notes/${RELEASE_TAG}.md"
+          else
+            gh release create "$RELEASE_TAG" \
+              "${release_assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "cfdns ${RELEASE_TAG}" \
+              --notes-file ".github/release-notes/${RELEASE_TAG}.md"
+          fi
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_DEPLOY_KEY" ]; then
+            printf 'Missing HOMEBREW_TAP_DEPLOY_KEY repository secret.\n' >&2
+            exit 1
+          fi
+
+          archive_name="cfdns-${RELEASE_TAG}-macos-universal.tar.gz"
+          archive_sha="$(awk -v archive_name="$archive_name" '$2 == archive_name { print $1 }' dist/SHA256SUMS)"
+          version_value="${RELEASE_TAG#v}"
+
+          if [ -z "$archive_sha" ]; then
+            printf 'Unable to resolve Homebrew asset metadata.\n' >&2
+            exit 1
+          fi
+
+          ssh_dir="$RUNNER_TEMP/cfdns-ssh"
+          tap_dir="$RUNNER_TEMP/homebrew-tap"
+          install -d -m 0700 "$ssh_dir"
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$ssh_dir/id_ed25519"
+          chmod 0600 "$ssh_dir/id_ed25519"
+          gh api meta --jq '.ssh_keys[] | "github.com \(.)"' > "$ssh_dir/known_hosts"
+          chmod 0600 "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
+
+          # 个人 Homebrew tap 仓库 (etng/homebrew-taps)。
+          git clone git@github.com:etng/homebrew-taps.git "$tap_dir"
+          mkdir -p "$tap_dir/Formula"
+          sed \
+            -e "s/__VERSION__/${version_value}/g" \
+            -e "s/__SHA256__/${archive_sha}/g" \
+            .github/homebrew/cfdns.rb.template \
+            > "$tap_dir/Formula/cfdns.rb"
+
+          ruby -c "$tap_dir/Formula/cfdns.rb"
+          git -C "$tap_dir" config user.name "github-actions[bot]"
+          git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$tap_dir" add Formula/cfdns.rb
+          git -C "$tap_dir" diff --cached --check
+
+          if git -C "$tap_dir" diff --cached --quiet; then
+            printf 'Homebrew formula is already up to date.\n'
+          else
+            git -C "$tap_dir" commit -m "chore(cfdns): update formula to ${RELEASE_TAG}"
+            git -C "$tap_dir" push origin main
+          fi

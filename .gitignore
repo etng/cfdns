@@ -1,0 +1,8 @@
+# 构建产物
+/dist/
+/cfdns
+*.tar.gz
+*.test
+
+# macOS
+.DS_Store
