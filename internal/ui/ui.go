@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"cfdns/internal/cfapi"
@@ -38,6 +39,8 @@ func Serve(addr, version string) error {
 	mux.HandleFunc("/api/pull", pullHandler)
 	mux.HandleFunc("/api/plan", planHandler)
 	mux.HandleFunc("/api/apply", applyHandler)
+	mux.HandleFunc("/api/versions", versionsListHandler)
+	mux.HandleFunc("/api/versions/", versionItemHandler)
 	return http.ListenAndServe(addr, mux)
 }
 
@@ -330,6 +333,106 @@ func applyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, res)
+}
+
+// ─────────────────────────── 版本快照 (GET 列表 / GET 单条 / POST 回退) ───────────────────────────
+
+// 版本列表: 最新在前。无版本文件时返回空数组(非错误)。
+func versionsListHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	vs, err := engine.LoadVersions(config.DefaultConfigDir())
+	if err != nil {
+		writeJSON(w, 200, []interface{}{})
+		return
+	}
+	for i, j := 0, len(vs)-1; i < j; i, j = i+1, j-1 {
+		vs[i], vs[j] = vs[j], vs[i]
+	}
+	writeJSON(w, 200, vs)
+}
+
+// 版本单条: GET 取详情; POST {id}/restore 把该版本状态恢复到本地 config.yaml(不动线上)。
+func versionItemHandler(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/versions/")
+	parts := strings.Split(rest, "/")
+	id := parts[0]
+	if id == "" {
+		writeJSON(w, 400, map[string]string{"error": "缺少版本 id"})
+		return
+	}
+	dir := config.DefaultConfigDir()
+	if r.Method == http.MethodGet {
+		v, err := engine.GetVersion(dir, id)
+		if err != nil {
+			writeJSON(w, 404, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, v)
+		return
+	}
+	if r.Method == http.MethodPost && len(parts) >= 2 && parts[1] == "restore" {
+		restoreVersion(w, dir, id)
+		return
+	}
+	http.Error(w, "method not allowed", 405)
+}
+
+// restoreVersion 把版本 v 的线上状态还原为本地 config.yaml(期望配置)。
+// 仅修改本地文件, 不触碰 Cloudflare; 用户需随后预览+应用推回线上。token 字段原样保留。
+func restoreVersion(w http.ResponseWriter, dir, id string) {
+	v, err := engine.GetVersion(dir, id)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	var existing *config.Config
+	if c, e := config.LoadConfig(configPath()); e == nil {
+		existing = c
+	}
+	nc := config.Config{ConfigDir: dir}
+	if existing != nil {
+		nc.Token = existing.Token
+		nc.TokenEnv = existing.TokenEnv
+		nc.TokenFile = existing.TokenFile
+		if existing.DefaultTTL != 0 {
+			nc.DefaultTTL = existing.DefaultTTL
+		}
+	}
+	if nc.DefaultTTL == 0 {
+		nc.DefaultTTL = 1
+	}
+	for _, z := range v.Zones {
+		zc := config.ZoneConfig{Domain: z.Domain, SSL: z.SSL}
+		for _, r := range z.Records {
+			ssl := ""
+			if z.PerHostSSL != nil {
+				ssl = z.PerHostSSL[r.Name]
+			}
+			zc.Records = append(zc.Records, config.RecordConfig{
+				Name:    config.ShortName(r.Name, z.Domain),
+				Type:    r.Type,
+				Content: r.Content,
+				Proxy:   r.Proxied,
+				TTL:     r.TTL,
+				Comment: r.Comment,
+				SSL:     ssl,
+			})
+		}
+		nc.Zones = append(nc.Zones, zc)
+	}
+	b, err := yamlMarshal(nc)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "序列化配置失败: " + err.Error()})
+		return
+	}
+	if err := os.WriteFile(configPath(), b, 0o600); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "写配置失败: " + err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"ok": "restored", "id": id})
 }
 
 // ─────────────────────────── 内部辅助 ───────────────────────────

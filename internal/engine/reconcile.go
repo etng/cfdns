@@ -519,6 +519,25 @@ func WriteState(dir, version string, res *Result) error {
 		if err := state.SaveApplied(dir, snap); err != nil {
 			return err
 		}
+		// 追加版本快照: 每次成功 apply 都记录一份可回退 + 可查看变更历史的版本
+		var alldiff []Change
+		for _, zr := range res.Zones {
+			alldiff = append(alldiff, zr.Changes...)
+			alldiff = append(alldiff, zr.Drift...)
+		}
+		diffJSON, _ := json.Marshal(alldiff)
+		ver := Version{
+			ID:      "v" + strings.ReplaceAll(strings.ReplaceAll(st.GeneratedAt, ":", "-"), "T", "-"),
+			Time:    st.GeneratedAt,
+			AppVer:  version,
+			Summary: summarize(res),
+			Drift:   res.DriftDetected,
+			Zones:   snap.Zones,
+			Diff:    diffJSON,
+		}
+		if err := AppendVersion(dir, ver); err != nil {
+			return err
+		}
 	}
 	return nil
 }

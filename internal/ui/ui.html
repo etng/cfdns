@@ -56,6 +56,7 @@
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .btn.sm { padding: 3px 8px; font-size: 12px; }
   .btn.danger { color: var(--red); border-color: #fecaca; }
+  .btn.danger:hover:not(:disabled) { background: #fef2f2; }
 
   .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
            font-size: 12px; border: 1px solid var(--line); background: #fff; }
@@ -89,29 +90,48 @@
   .pill.gray { color: var(--gray); }
   .row-del { color: var(--red); cursor: pointer; border: none; background: none; font-size: 16px; }
   .add-row { margin-top: 8px; }
-  .diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; white-space: pre-wrap; }
-  .diff .del { color: var(--red); }
-  .diff .add { color: var(--green); }
-  .diff .ssl { color: var(--amber); }
-  .diff .drift { color: var(--red); background: #fef2f2; padding: 2px 6px; border-radius: 4px; }
-  .diff .zone-title { color: var(--muted); margin-top: 8px; }
   .err { color: var(--red); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; }
   .ok { color: var(--green); }
   .muted { color: var(--muted); }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
-  .confirm-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
+  .confirm-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 12px; }
   .confirm-box ul { margin: 8px 0; padding-left: 18px; }
   .confirm-box li { margin: 3px 0; }
   .banner { border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; font-size: 14px; font-weight: 600; }
   .banner.ok { background: #f0fdf4; color: var(--green); border: 1px solid #bbf7d0; }
   .banner.err { background: #fef2f2; color: var(--red); border: 1px solid #fecaca; }
   .toast { position: fixed; bottom: 18px; right: 18px; background: var(--ink); color: #fff;
-           padding: 10px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+           padding: 10px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 200; }
   .toast.show { opacity: .95; }
 
   /* ───── 底部声明 (全宽) ───── */
   footer { flex: 0 0 auto; text-align: center; padding: 8px 16px; font-size: 12px;
            color: var(--muted); background: var(--panel); border-top: 1px solid var(--line); }
+
+  /* ───── 模态框 ───── */
+  #modalMask { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none;
+               z-index: 100; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; }
+  #modalMask.show { display: flex; }
+  #modalBox { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+              width: min(900px, 100%); max-height: calc(100vh - 80px); display: flex; flex-direction: column;
+              box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+  .modal-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .modal-head h3 { margin: 0; font-size: 15px; }
+  .modal-body { flex: 1 1 auto; overflow: auto; padding: 16px 18px; min-height: 0; }
+  .modal-foot { flex: 0 0 auto; display: flex; gap: 10px; justify-content: flex-end; padding: 12px 18px; border-top: 1px solid var(--line); }
+
+  .diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; white-space: pre-wrap; }
+  .diff .del { color: var(--red); }
+  .diff .add { color: var(--green); }
+  .diff .ssl { color: var(--amber); }
+  .diff .drift { color: var(--red); background: #fef2f2; padding: 2px 6px; border-radius: 4px; }
+  .diff .zone-title { color: var(--muted); margin-top: 8px; }
+
+  /* ───── 版本历史 ───── */
+  .ver-row { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+  .ver-main { display: flex; flex-direction: column; gap: 2px; }
+  .ver-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .ver-diff { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -122,9 +142,10 @@
   <span id="drift" class="badge green">漂移: 无</span>
   <span id="applied" class="badge gray">上次推送: —</span>
   <span class="grow"></span>
+  <button class="btn" id="btnVersions">版本</button>
   <button class="btn" id="btnPull">拉取</button>
   <button class="btn" id="btnPlan">预览</button>
-  <button class="btn primary" id="btnApply" disabled>应用</button>
+  <button class="btn primary" id="btnApply">应用</button>
 </header>
 
 <div id="statusbar"></div>
@@ -141,26 +162,12 @@
   </aside>
 
   <main class="content">
-    <div id="warn" class="err" style="display:none"></div>
-
-    <div id="confirm" class="confirm-box" style="display:none">
-      <strong>⚠️ 以下记录将被从 Cloudflare 解绑（删除） — 此操作不可自动恢复</strong>
-      <div id="confirmList"></div>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
-        <input type="checkbox" id="confirmAll" style="width:auto" /> 我已逐条确认以上记录可删除（未勾选的记录本次不会删除）
-      </label>
-    </div>
-
     <div class="panel">
-      <h2>配置（可编辑） <span class="muted" style="font-weight:400">修改后点「预览」「应用」会自动保存</span>
+      <h2>配置（可编辑）
+        <span class="muted" style="font-weight:400">修改后点「预览」「应用」会自动保存</span>
         <button class="btn" id="btnSave" style="margin-left:auto">仅保存配置</button>
       </h2>
       <div id="editor"></div>
-    </div>
-
-    <div class="panel">
-      <h2>变更预览 / 应用结果</h2>
-      <div id="result"><p class="muted">尚未预览。修改配置后点「预览」查看 diff；确认无误再点「应用」。</p></div>
     </div>
   </main>
 </div>
@@ -169,15 +176,25 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- 模态框容器 -->
+<div id="modalMask">
+  <div id="modalBox">
+    <div class="modal-head"><h3 id="modalTitle">—</h3><span class="grow"></span><button class="btn sm" onclick="closeModal()">✕</button></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
 <script>
 const TYPE_OPTS = ["A","AAAA","CNAME","MX","TXT","NS","SRV","CAA","PTR"];
 const SSL_OPTS = ["","off","flexible","full","full_strict"];
 let boot = null;          // GET /api/config 的数据
 let editor = null;        // 可编辑配置副本
 let plan = null;          // 最新 plan 结果
-let pending = [];         // plan 中的待删除项
-let collapsedSet = new Set(); // 折叠的 zone 下标
-let activeZone = -1;      // 当前定位的 zone
+let pending = [];         // plan 中的待删除项(模态框内确认)
+let collapsedSet = new Set();
+let activeZone = -1;
+let versionsCache = {};   // 版本列表缓存, 按 id 索引
 
 function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
 function esc(s){ return (s??"").replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -191,19 +208,28 @@ async function api(path, method='GET', body){
   return { status:r.status, data };
 }
 
-// 期间禁用所有操作按钮, 状态条显示处理中; 结束后恢复并刷新应用按钮状态
 async function withBusy(label, fn){
-  const btns=[document.getElementById('btnPull'),document.getElementById('btnPlan'),document.getElementById('btnApply'),document.getElementById('btnSave')];
+  const btns=[document.getElementById('btnPull'),document.getElementById('btnPlan'),document.getElementById('btnApply'),document.getElementById('btnSave'),document.getElementById('btnVersions')];
   btns.forEach(b=>b.disabled=true);
   setStatus('处理中: '+label+' …', 'info');
   try { await fn(); }
-  catch(e){ showWarn('请求异常: '+e.message); }
+  catch(e){ setStatus('请求异常: '+e.message, 'err'); }
   finally {
     btns.forEach(b=>b.disabled=false);
-    updateApplyBtn();
   }
 }
 
+// ───────────────── 模态框 ─────────────────
+function openModal(title, bodyHTML, footHTML){
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = bodyHTML;
+  document.getElementById('modalFoot').innerHTML = footHTML;
+  document.getElementById('modalMask').classList.add('show');
+}
+function closeModal(){ document.getElementById('modalMask').classList.remove('show'); }
+document.getElementById('modalMask').addEventListener('click', e=>{ if(e.target.id==='modalMask') closeModal(); });
+
+// ───────────────── 启动 ─────────────────
 async function boot_(){
   const {data} = await api('/api/config');
   boot = data;
@@ -212,7 +238,6 @@ async function boot_(){
   renderHeader();
   renderEditor();
   renderSidebar();
-  renderResultIdle();
   updateFooter();
 }
 
@@ -313,70 +338,33 @@ function delRec(zi,ri){ editor.zones[zi].records.splice(ri,1); renderEditor(); }
 
 async function saveConfig(){
   const {status,data} = await api('/api/config','PUT',editor);
-  if(status!==200){ showWarn('保存失败: '+(data&&data.error||status)); return false; }
+  if(status!==200){ setStatus('保存失败: '+(data&&data.error||status), 'err'); return false; }
   return true;
 }
 
 function showWarn(msg){ setStatus(msg, 'err'); }
-function hideWarn(){ setStatus('', ''); document.getElementById('statusbar').style.display='none'; }
 
-async function doPull(){
-  await withBusy('拉取线上现状', async ()=>{
-    hideWarn();
-    const {status,data}=await api('/api/pull','POST');
-    if(status!==200){ showWarn('拉取失败: '+(data&&data.error||status)); return; }
-    toast('已拉取 '+(data.zones||0)+' 个域名');
-    setStatus('已拉取 '+ (data.zones||0) +' 个域名的线上现状', 'ok');
-    await boot_();
-  });
+// ───────────────── 变更 diff 渲染 ─────────────────
+function changeLineHTML(c){
+  if(c.action==='delete'){ return `<span class="del">  - ${esc(c.type)} ${esc(c.name)} (${esc(c.old)}) ${c.proxied?'[橙云]':''}</span>\n`; }
+  if(c.action==='create'){
+    if(c.field){ return `  <span class="add">${esc(c.field)}</span>\n`; }
+    return `<span class="add">  + ${esc(c.type)} ${esc(c.name)} (${esc(c.new)}) ${c.proxied?'[橙云]':''}</span>\n`;
+  }
+  if(c.action==='update'){
+    const detail = c.field || `内容 ${c.old} → ${c.new}`;
+    return `<span class="add">  ~ ${esc(c.type)} ${esc(c.name)}: ${esc(detail)} ${c.proxied?'[橙云]':''}</span>\n`;
+  }
+  if(c.action==='ssl-zone'){ return c.field? `<span class="ssl">  ${esc(c.field)}</span>\n` : ''; }
+  if(c.action==='ssl-host'){ return `<span class="ssl">  · 按主机SSL ${esc(c.name)}: ${esc(c.old)} → ${esc(c.new)}</span>\n`; }
+  return `  ${esc(c.action)} ${esc(c.name)}: ${esc(c.old)} → ${esc(c.new)}\n`;
 }
 
-async function doPlan(){
-  await withBusy('预览变更', async ()=>{
-    hideWarn();
-    if(!await saveConfig()) return;
-    const {status,data}=await api('/api/plan','POST');
-    if(status!==200){ showWarn('预览失败: '+(data&&data.error||status)); return; }
-    plan=data; renderResult(data, false);
-    const n = countChanges(data);
-    setStatus(n>0 ? ('预览完成：'+n+' 处待变更'+(data.drift_detected?'（检测到漂移，已基于最新现状重新对账）':'')) : '预览完成：无变更', n>0?'info':'ok');
-    toast(n>0? n+' 处待变更':'无变更');
-  });
-}
-
-async function doApply(){
-  await withBusy('应用变更', async ()=>{
-    hideWarn();
-    if(!await saveConfig()) return;
-    const ids = pending.filter(p=>p.checked).map(p=>p.id);
-    const {status,data}=await api('/api/apply','POST',{delete_ids:ids, delete_extra:false, confirmed:true});
-    const resultEl = document.getElementById('result');
-    if(status===409){
-      showWarn('存在未确认的待删除记录，请先逐条确认。');
-      pending = (data.pending_deletes||[]).map(p=>({...p, checked:false}));
-      renderConfirm(); renderResult(data,true); return;
-    }
-    if(status!==200){ showWarn('应用失败: '+(data&&data.error||status)); return; }
-    toast('已应用');
-    pending=[]; renderConfirm();
-    setStatus('应用完成，已写入 last_applied 基线'+(data.drift_detected?'；检测到漂移并已重新对账':''), 'ok');
-    resultEl.insertAdjacentHTML('afterbegin', '<div class="banner ok">✅ 应用成功，已写入基线'+(data.drift_detected?'（检测到漂移，已基于最新现状重新对账）':'')+'</div>');
-    await boot_();
-    renderResult(data, true);
-  });
-}
-
-function countChanges(res){
-  let n=0;
-  for(const z of (res.zones||[])) n += (z.changes||[]).length + (z.drift||[]).length;
-  return n;
-}
-
-function renderResult(res, isApply){
-  const el = document.getElementById('result');
-  if(!res || !res.zones){ el.innerHTML='<p class="muted">无数据</p>'; return; }
-  let html = '';
+// 渲染整份 diff 为字符串, 并收集待删除项到 pending
+function buildDiffHTML(res){
   pending = [];
+  if(!res || !res.zones){ return '<p class="muted">无数据</p>'; }
+  let html = '';
   for(const z of res.zones){
     html += `<div class="diff"><span class="zone-title">■ ${esc(z.domain)}</span>\n`;
     if(z.drift && z.drift.length){
@@ -385,65 +373,156 @@ function renderResult(res, isApply){
     }
     if(z.ssl_changed){ html += `<span class="ssl">  Zone SSL: ${esc(z.ssl_from)} → ${esc(z.ssl_to)}</span>\n`; }
     for(const c of (z.changes||[])){
-      if(c.action==='ssl-zone'){ if(c.field) html+=`<span class="ssl">  ${esc(c.field)}</span>\n`; continue; }
-      if(c.action==='delete'){
-        pending.push({id:c.id, domain:c.domain, type:c.type, name:c.name, old:c.old, checked:false});
-        html += `<span class="del">  - ${esc(c.type)} ${esc(c.name)} (${esc(c.old)}) ${c.proxied?'[橙云]':''}</span>\n`;
-        continue;
-      }
-      if(c.action==='create'){
-        if(c.field){ html += `  <span class="add">${esc(c.field)}</span>\n`; }
-        else { html += `<span class="add">  + ${esc(c.type)} ${esc(c.name)} (${esc(c.new)}) ${c.proxied?'[橙云]':''}</span>\n`; }
-        continue;
-      }
-      if(c.action==='update'){
-        const detail = c.field || `内容 ${c.old} → ${c.new}`;
-        html += `<span class="add">  ~ ${esc(c.type)} ${esc(c.name)}: ${esc(detail)} ${c.proxied?'[橙云]':''}</span>\n`;
-        continue;
-      }
-      if(c.action==='ssl-host'){ html += `<span class="ssl">  · 按主机SSL ${esc(c.name)}: ${esc(c.old)} → ${esc(c.new)}</span>\n`; continue; }
-      html += `  ${esc(c.action)} ${esc(c.name)}: ${esc(c.old)} → ${esc(c.new)}\n`;
+      if(c.action==='delete'){ pending.push({id:c.id, domain:c.domain, type:c.type, name:c.name, old:c.old, checked:false}); }
+      html += changeLineHTML(c);
     }
     if(z.host_ssl_rules||z.host_ssl_other){ html += `  · 按主机SSL: ${z.host_ssl_rules} 条规则（保留其他用户规则 ${z.host_ssl_other} 条）\n`; }
     if(!z.changed && (!z.drift||!z.drift.length)){ html += `  (无需变更)\n`; }
     if(z.has_error){ html += `  <span class="del">!! 该域名处理出错</span>\n`; }
     html += `</div>`;
   }
-  el.innerHTML = html;
-  renderSidebar();
-  renderConfirm();
-  updateApplyBtn();
+  return html;
 }
 
-function renderConfirm(){
-  const box = document.getElementById('confirm');
-  if(!pending.length){ box.style.display='none'; return; }
-  box.style.display='block';
-  const list = document.getElementById('confirmList');
-  list.innerHTML = '<ul>' + pending.map((p,i)=>`<li><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-i="${i}" onchange="togglePending(${i},this.checked)" style="width:auto"> ${esc(p.type)} ${esc(p.name)} — ${esc(p.old)}</label></li>`).join('') + '</ul>';
-  document.getElementById('confirmAll').onchange = (e)=>{ pending.forEach(p=>{ p.checked=e.target.checked; }); renderConfirmChecks(); };
-  renderConfirmChecks();
+function countChanges(res){
+  let n=0;
+  for(const z of (res.zones||[])) n += (z.changes||[]).length + (z.drift||[]).length;
+  return n;
 }
 
-function togglePending(i, v){ pending[i].checked=v; renderConfirmChecks(); }
-function renderConfirmChecks(){
-  document.querySelectorAll('#confirmList input[type=checkbox]').forEach((cb,i)=>{ cb.checked = pending[i].checked; });
+// ───────────────── 预览 / 应用 模态框 ─────────────────
+async function openPreviewModal(){
+  await withBusy('预览变更', async ()=>{
+    if(!await saveConfig()) return;
+    const {status,data} = await api('/api/plan','POST');
+    if(status!==200){ openModal('预览失败', '<div class="err">'+esc(data&&data.error||status)+'</div>', '<button class="btn" onclick="closeModal()">关闭</button>'); return; }
+    plan = data;
+    renderPreviewModal(data);
+  });
+}
+
+function renderPreviewModal(res){
+  const diffHTML = buildDiffHTML(res);
+  let confirmHTML = '';
+  if(pending.length){
+    confirmHTML = `<div class="confirm-box" style="margin-top:14px">
+      <strong>⚠️ 以下记录将解绑（删除） — 此操作不可自动恢复：</strong>
+      <ul>${pending.map((p,i)=>`<li><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-i="${i}" onchange="togglePending(${i},this.checked)" style="width:auto"> ${esc(p.type)} ${esc(p.name)} — ${esc(p.old)}</label></li>`).join('')}</ul>
+      <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="confirmAll" onchange="toggleAllPending(this.checked)" style="width:auto"> 我已逐条确认以上记录可删除（未勾选的记录本次不会删除）</label>
+    </div>`;
+  }
+  const n = countChanges(res);
+  const foot = `<button class="btn" onclick="closeModal()">取消</button>
+    <button class="btn primary" id="modalApplyBtn" ${pending.length?'disabled':''} onclick="applyFromModal()">应用到 Cloudflare${n?('（'+n+' 处）'):''}</button>`;
+  openModal('预览 · 变更 '+n+' 处'+(res.drift_detected?' · 漂移已重对账':''), diffHTML + confirmHTML, foot);
+  updateModalApplyBtn();
+}
+
+function togglePending(i,v){ pending[i].checked=v; renderModalConfirmChecks(); }
+function toggleAllPending(v){ pending.forEach(p=>p.checked=v); renderModalConfirmChecks(); }
+function renderModalConfirmChecks(){
+  pending.forEach((p,i)=>{ const cb=document.querySelector('#modalBody input[data-i="'+i+'"]'); if(cb) cb.checked=p.checked; });
   const all = pending.length>0 && pending.every(p=>p.checked);
-  document.getElementById('confirmAll').checked = all;
-  updateApplyBtn();
+  const ca = document.getElementById('confirmAll'); if(ca) ca.checked=all;
+  updateModalApplyBtn();
 }
-function updateApplyBtn(){
-  const btn = document.getElementById('btnApply');
-  if(!pending.length){ btn.disabled=false; return; }
-  btn.disabled = !pending.every(p=>p.checked);
+function updateModalApplyBtn(){
+  const btn = document.getElementById('modalApplyBtn');
+  if(!btn) return;
+  btn.disabled = pending.length>0 && !pending.every(p=>p.checked);
 }
 
-function renderResultIdle(){ document.getElementById('result').innerHTML='<p class="muted">尚未预览。修改配置后点「预览」查看 diff；确认无误再点「应用」。</p>'; }
+async function applyFromModal(){
+  if(pending.length && !pending.every(p=>p.checked)){ return; }
+  const btn = document.getElementById('modalApplyBtn'); if(btn) btn.disabled=true;
+  await withBusy('应用变更', async ()=>{
+    const ids = pending.filter(p=>p.checked).map(p=>p.id);
+    const {status,data} = await api('/api/apply','POST',{delete_ids:ids, delete_extra:false, confirmed:true});
+    if(status===409){
+      openModal('应用被拦截', '<div class="err">存在未确认的待删除记录，请返回逐条确认。</div>', '<button class="btn" onclick="closeModal()">关闭</button>');
+      return;
+    }
+    if(status!==200){ openModal('应用失败', '<div class="err">'+esc(data&&data.error||status)+'</div>', '<button class="btn" onclick="closeModal()">关闭</button>'); return; }
+    closeModal();
+    setStatus('应用完成，已写入基线并保存版本快照'+(data.drift_detected?'；检测到漂移并已重新对账':''),'ok');
+    toast('已应用');
+    await boot_();
+  });
+}
+
+// ───────────────── 版本历史 / 回退 ─────────────────
+async function openVersionsModal(){
+  const {status,data} = await api('/api/versions');
+  if(status!==200){ openModal('版本历史', '<div class="err">'+esc(data&&data.error||status)+'</div>', '<button class="btn" onclick="closeModal()">关闭</button>'); return; }
+  const vs = data||[];
+  versionsCache = {}; vs.forEach(v=>versionsCache[v.id]=v);
+  let body = '';
+  if(!vs.length){ body = '<p class="muted">暂无版本。每次成功「应用」都会在此保存一份版本快照，可查看变更记录、并回退到任意历史版本。</p>'; }
+  else { body = vs.map(verRowHTML).join(''); }
+  openModal('版本历史（'+vs.length+'）', body, '<button class="btn" onclick="closeModal()">关闭</button>');
+}
+
+function verRowHTML(v){
+  const t = (v.time||'').replace('T',' ').slice(0,19);
+  const drift = v.drift ? '<span class="badge red">漂移</span>' : '';
+  const diffCount = Array.isArray(v.diff)? v.diff.length : 0;
+  return `<div class="ver-row" data-id="${esc(v.id)}">
+    <div class="ver-main">
+      <div><strong>${esc(v.id)}</strong> <span class="muted">${esc(t)}</span> ${drift}</div>
+      <div class="muted">${esc(v.summary||'')} · app ${esc(v.app_ver||'?')} · 变更 ${diffCount} 条 · ${(v.zones||[]).length} 个域名</div>
+    </div>
+    <div class="ver-actions">
+      <button class="btn sm" onclick="toggleVerDiff('${esc(v.id)}')">查看变更</button>
+      <button class="btn sm" onclick="confirmRollback('${esc(v.id)}')">回退到此版本</button>
+    </div>
+    <div class="ver-diff" id="verdiff-${esc(v.id)}" style="display:none"></div>
+  </div>`;
+}
+
+function toggleVerDiff(id){
+  const el = document.getElementById('verdiff-'+id);
+  if(el.style.display!=='none'){ el.style.display='none'; return; }
+  const v = versionsCache[id];
+  const diff = (v&&v.diff)||[];
+  let html = diff.length ? diff.map(changeLineHTML).join('') : '<p class="muted">无变更记录</p>';
+  el.innerHTML = '<div class="diff" style="margin-top:8px">'+html+'</div>';
+  el.style.display='block';
+}
+
+function confirmRollback(id){
+  const v = versionsCache[id];
+  openModal('回退到版本 '+id,
+    `<p>将把本地配置 <code>config.yaml</code> 恢复为该版本记录的线上状态（共 ${(v.zones||[]).length} 个域名、${Array.isArray(v.diff)?v.diff.length:0} 条变更）。</p>
+     <p class="muted">恢复后请点「预览」核对差异，再「应用」推回 Cloudflare。此操作只修改本地配置，不会立即改动线上。</p>`,
+    `<button class="btn" onclick="closeModal()">取消</button>
+     <button class="btn danger" onclick="doRollback('${esc(id)}')">确认恢复配置</button>`);
+}
+
+async function doRollback(id){
+  const {status,data} = await api('/api/versions/'+id+'/restore','POST');
+  if(status!==200){ openModal('回退失败', '<div class="err">'+esc(data&&data.error||status)+'</div>', '<button class="btn" onclick="closeModal()">关闭</button>'); return; }
+  closeModal();
+  setStatus('已恢复配置到版本 '+id+'，请预览并应用', 'ok');
+  toast('已恢复到 '+id);
+  await boot_();
+}
+
+// ───────────────── 拉取 / 保存 ─────────────────
+async function doPull(){
+  await withBusy('拉取线上现状', async ()=>{
+    const {status,data}=await api('/api/pull','POST');
+    if(status!==200){ showWarn('拉取失败: '+(data&&data.error||status)); return; }
+    toast('已拉取 '+(data.zones||0)+' 个域名');
+    setStatus('已拉取 '+ (data.zones||0) +' 个域名的线上现状', 'ok');
+    await boot_();
+  });
+}
 
 document.getElementById('btnPull').onclick = doPull;
-document.getElementById('btnPlan').onclick = doPlan;
-document.getElementById('btnApply').onclick = doApply;
-document.getElementById('btnSave').onclick = async ()=>{ await withBusy('保存配置', async ()=>{ hideWarn(); if(await saveConfig()){ setStatus('配置已保存','ok'); toast('配置已保存'); } }); };
+document.getElementById('btnPlan').onclick = openPreviewModal;
+document.getElementById('btnApply').onclick = openPreviewModal;   // 应用也走「预览 + 模态框内确认」
+document.getElementById('btnVersions').onclick = openVersionsModal;
+document.getElementById('btnSave').onclick = async ()=>{ await withBusy('保存配置', async ()=>{ if(await saveConfig()){ setStatus('配置已保存','ok'); toast('配置已保存'); } }); };
 
 boot_();
 </script>

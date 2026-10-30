@@ -305,3 +305,60 @@ func TestDriftDetectionAndReconcile(t *testing.T) {
 		t.Fatalf("应基于最新现状重新对账 9.9.9.9->1.2.3.4, zones=%+v", res.Zones)
 	}
 }
+
+// TestVersionSnapshotOnApply 锁定「每次成功 apply 都写入一份版本快照」:
+// WriteState 后 versions.json 存在, 含一条版本, 其 Zones 为应用后的完整状态, Diff 为本次变更。
+func TestVersionSnapshotOnApply(t *testing.T) {
+	dir := t.TempDir()
+	f := newFake()
+	cfg := cfgWith(config.RecordConfig{Name: "@", Type: "A", Content: "1.2.3.4", Proxy: true})
+
+	res, err := Reconcile(f, cfg, Options{DryRun: false, ConfigDir: dir, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteState(dir, "test", res); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "versions.json")); err != nil {
+		t.Fatalf("apply 后应写入 versions.json: %v", err)
+	}
+	vs, err := LoadVersions(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vs) != 1 {
+		t.Fatalf("应有 1 个版本, 实际 %d", len(vs))
+	}
+	v := vs[0]
+	if v.Summary == "" || !strings.Contains(v.Summary, "新建") {
+		t.Fatalf("版本摘要应含「新建」, 实际=%q", v.Summary)
+	}
+	if len(v.Zones) != 1 || len(v.Zones[0].Records) != 1 || v.Zones[0].Records[0].Content != "1.2.3.4" {
+		t.Fatalf("版本 Zones 应含应用后的完整状态, 实际=%+v", v.Zones)
+	}
+	if len(v.Diff) == 0 {
+		t.Fatalf("版本 Diff 应记录本次变更, 实际为空")
+	}
+
+	// 第二次 apply(改内容) 应再追加一条, 而非覆盖
+	res2, err := Reconcile(f, cfgWith(config.RecordConfig{Name: "@", Type: "A", Content: "9.9.9.9", Proxy: true}), Options{DryRun: false, ConfigDir: dir, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteState(dir, "test", res2); err != nil {
+		t.Fatal(err)
+	}
+	vs2, _ := LoadVersions(dir)
+	if len(vs2) != 2 {
+		t.Fatalf("第二次 apply 后应累计 2 个版本, 实际 %d", len(vs2))
+	}
+	// GetVersion 按 id 可取回
+	got, err := GetVersion(dir, v.ID)
+	if err != nil {
+		t.Fatalf("GetVersion 失败: %v", err)
+	}
+	if len(got.Zones[0].Records) != 1 {
+		t.Fatalf("GetVersion 返回内容不符: %+v", got.Zones)
+	}
+}

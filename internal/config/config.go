@@ -14,9 +14,9 @@ import (
 // Config 是 ~/.config/cfdns/config.yaml 的结构。
 // 注意：token 不写进本文件，单独存放在同目录的 .token。
 type Config struct {
-	Token      string       `yaml:"token"`     // 明文(不推荐)
-	TokenEnv   string       `yaml:"token_env"` // 环境变量名
-	TokenFile  string       `yaml:"token_file"` // 自定义 token 文件路径
+	Token      string       `yaml:"token,omitempty"`     // 明文(不推荐)
+	TokenEnv   string       `yaml:"token_env,omitempty"` // 环境变量名
+	TokenFile  string       `yaml:"token_file,omitempty"` // 自定义 token 文件路径
 	DefaultTTL int          `yaml:"default_ttl"`
 	Zones      []ZoneConfig `yaml:"zones"`
 	ConfigDir  string       `yaml:"-"` // 配置文件所在目录(运行时填充)
