@@ -173,8 +173,9 @@ func Reconcile(client cfClient, cfg *config.Config, opts Options) (*Result, erro
 				short := config.ShortName(d.Name, zc.Domain)
 				if i < len(haves) {
 					h := haves[i]
-					if differ(h, d) {
-						zr.Changes = append(zr.Changes, Change{Domain: zc.Domain, Type: d.Type, Name: short, Action: "update", Old: h.Content, New: d.Content, Proxied: d.Proxied})
+				if parts := changeParts(h, d); len(parts) > 0 {
+					field := strings.Join(parts, "; ")
+					zr.Changes = append(zr.Changes, Change{Domain: zc.Domain, Type: d.Type, Name: short, Action: "update", Old: h.Content, New: d.Content, Proxied: d.Proxied, Field: field})
 						zr.Changed = true
 						if !opts.DryRun {
 							d.ID = h.ID
@@ -325,18 +326,44 @@ func detectDrift(domain string, base appliedBaseline, live []cfapi.CfRecord, liv
 
 // ─────────────────────────── 判定/辅助 ───────────────────────────
 
-func differ(h cfapi.CfRecord, d cfapi.CfRecord) bool {
+// changeParts 返回线上现状 h 与期望 d 之间所有差异字段的人类可读描述。
+// 空切片表示无差异。用于生成 update 文本, 同时作为 differ 的底层判定。
+// 注意: 备注(comment)也纳入比对 —— 改备注必须能被预览与应用感知。
+func changeParts(h cfapi.CfRecord, d cfapi.CfRecord) []string {
+	var p []string
 	if h.Content != d.Content {
-		return true
+		p = append(p, "内容 "+h.Content+" → "+d.Content)
 	}
 	if h.Proxied != d.Proxied {
-		return true
+		p = append(p, "代理 "+(b2s(h.Proxied))+" → "+(b2s(d.Proxied)))
 	}
 	// ttl=1 在 CF 中表示"自动", 与配置的默认 1 视为等价
 	if h.TTL != d.TTL && !(h.TTL == 1 || d.TTL == 1) {
-		return true
+		p = append(p, fmt.Sprintf("TTL %d → %d", h.TTL, d.TTL))
 	}
-	return false
+	if h.Comment != d.Comment {
+		p = append(p, "备注 "+qstr(h.Comment)+" → "+qstr(d.Comment))
+	}
+	return p
+}
+
+func b2s(b bool) string {
+	if b {
+		return "橙云"
+	}
+	return "灰云"
+}
+
+func qstr(s string) string {
+	if s == "" {
+		return "(空)"
+	}
+	return "'" + s + "'"
+}
+
+// differ 判断线上现状 h 与期望 d 是否不同(内容/代理/TTL/备注任一不同即为变更)。
+func differ(h cfapi.CfRecord, d cfapi.CfRecord) bool {
+	return len(changeParts(h, d)) > 0
 }
 
 func SortedKeys[T any](m map[string][]T) []string {

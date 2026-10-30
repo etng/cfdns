@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cfdns/internal/cfapi"
@@ -112,6 +113,50 @@ func TestCreateThenApply(t *testing.T) {
 	rs := f.records["z1"]
 	if len(rs) != 1 || rs[0].Content != "1.2.3.4" || !rs[0].Proxied {
 		t.Fatalf("apply 后线上记录不符: %+v", rs)
+	}
+}
+
+// TestCommentChangeDetected 锁定「改备注即触发 update」的修复:
+// 线上与配置的内容/代理/TTL 完全一致, 仅备注不同 —— 必须在预览中体现, 且 apply 后写回 CF。
+func TestCommentChangeDetected(t *testing.T) {
+	f := newFake()
+	f.records["z1"] = []cfapi.CfRecord{{ID: "id-@", Type: "A", Name: "example.com", Content: "1.2.3.4", Proxied: true, TTL: 1, Comment: ""}}
+	cfg := cfgWith(config.RecordConfig{Name: "@", Type: "A", Content: "1.2.3.4", Proxy: true, Comment: "我的备注"})
+
+	// plan: 应检测到备注变更(update), 且 Field 说明里含「备注」
+	res, err := Reconcile(f, cfg, Options{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.calls["update"] != 0 {
+		t.Fatalf("plan 不应写 CF, 实际 update=%d", f.calls["update"])
+	}
+	var upd *Change
+	for i := range res.Zones[0].Changes {
+		if res.Zones[0].Changes[i].Action == "update" {
+			upd = &res.Zones[0].Changes[i]
+		}
+	}
+	if upd == nil {
+		t.Fatalf("仅改备注应产生 update, 实际 changes=%+v", res.Zones[0].Changes)
+	}
+	if !strings.Contains(upd.Field, "备注") {
+		t.Fatalf("update 文本应含「备注」, 实际 Field=%q", upd.Field)
+	}
+
+	// apply: 真实更新, 备注应写回 CF
+	res2, err := Reconcile(f, cfg, Options{DryRun: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.calls["update"] != 1 {
+		t.Fatalf("apply 应更新 1 条, 实际 update=%d", f.calls["update"])
+	}
+	if len(res2.Zones) == 0 || len(f.records["z1"]) == 0 {
+		t.Fatal("apply 后线上记录丢失")
+	}
+	if f.records["z1"][0].Comment != "我的备注" {
+		t.Fatalf("apply 后线上备注未被写回, 实际=%q", f.records["z1"][0].Comment)
 	}
 }
 
