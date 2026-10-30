@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>cfdns · 本地 DNS 管理</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1f2329; --muted: #6b7280;
+    --line: #e5e7eb; --brand: #f6821f; --brand-ink: #fff;
+    --orange: #f6821f; --gray: #6b7280; --green: #16a34a; --red: #dc2626;
+    --amber: #d97706; --blue: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
+  header { position: sticky; top: 0; z-index: 10; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  .grow { flex: 1; }
+  .btn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
+  .btn:hover { border-color: var(--brand); }
+  .btn.primary { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); }
+  .btn.primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.danger { color: var(--red); border-color: #fecaca; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); background: #fff; }
+  .badge.orange { color: var(--orange); border-color: #fed7aa; background: #fff7ed; }
+  .badge.gray { color: var(--gray); }
+  .badge.green { color: var(--green); border-color: #bbf7d0; background: #f0fdf4; }
+  .badge.red { color: var(--red); border-color: #fecaca; background: #fef2f2; }
+  .badge.amber { color: var(--amber); border-color: #fde68a; background: #fffbeb; }
+  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .zone { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; overflow: hidden; }
+  .zone > .zhead { background: #fafafa; padding: 10px 12px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+  .zone .zbody { padding: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  input, select { font: inherit; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; width: 100%; background: #fff; }
+  td.c-proxy, td.c-ssl, td.c-ttl, td.c-del { width: 90px; }
+  td.c-type { width: 92px; }
+  td.c-name { width: 140px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
+  .pill.orange { color: var(--orange); border-color: #fed7aa; background: #fff7ed; }
+  .pill.gray { color: var(--gray); }
+  .row-del { color: var(--red); cursor: pointer; border: none; background: none; font-size: 16px; }
+  .add-row { margin-top: 8px; }
+  .diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; white-space: pre-wrap; }
+  .diff .del { color: var(--red); }
+  .diff .add { color: var(--green); }
+  .diff .ssl { color: var(--amber); }
+  .diff .drift { color: var(--red); background: #fef2f2; padding: 2px 6px; border-radius: 4px; }
+  .diff .zone-title { color: var(--muted); margin-top: 8px; }
+  .err { color: var(--red); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; }
+  .ok { color: var(--green); }
+  .muted { color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .confirm-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
+  .confirm-box ul { margin: 8px 0; padding-left: 18px; }
+  .confirm-box li { margin: 3px 0; }
+  .toast { position: fixed; bottom: 18px; right: 18px; background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cfdns <span class="muted" style="font-weight:400">本地 DNS 管理</span></h1>
+  <span id="tok" class="badge gray">token: …</span>
+  <span id="ver" class="badge gray">v…</span>
+  <span id="drift" class="badge green">漂移: 无</span>
+  <span id="applied" class="badge gray">上次推送: —</span>
+  <span class="grow"></span>
+  <button class="btn" id="btnPull">拉取</button>
+  <button class="btn" id="btnPlan">预览</button>
+  <button class="btn primary" id="btnApply" disabled>应用</button>
+</header>
+
+<main>
+  <div id="warn" class="err" style="display:none"></div>
+
+  <div id="confirm" class="confirm-box" style="display:none">
+    <strong>⚠️ 以下记录将被从 Cloudflare 解绑（删除） — 此操作不可自动恢复</strong>
+    <div id="confirmList"></div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
+      <input type="checkbox" id="confirmAll" style="width:auto" /> 我已逐条确认以上记录可删除（未勾选的记录本次不会删除）
+    </label>
+  </div>
+
+  <div class="panel">
+    <h2>配置（可编辑） <span class="muted" style="font-weight:400">修改后点「预览」「应用」会自动保存</span>
+      <button class="btn" id="btnSave" style="margin-left:auto">仅保存配置</button>
+    </h2>
+    <div id="editor"></div>
+  </div>
+
+  <div class="panel">
+    <h2>变更预览 / 应用结果</h2>
+    <div id="result"><p class="muted">尚未预览。修改配置后点「预览」查看 diff；确认无误再点「应用」。</p></div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const TYPE_OPTS = ["A","AAAA","CNAME","MX","TXT","NS","SRV","CAA","PTR"];
+const SSL_OPTS = ["","off","flexible","full","full_strict"];
+let boot = null;      // GET /api/config 的数据
+let editor = null;    // 可编辑配置副本
+let plan = null;      // 最新 plan 结果
+let pending = [];     // plan 中的待删除项
+
+function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
+function esc(s){ return (s??"").replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function proxyPill(p){ return p? '<span class="pill orange">橙云</span>' : '<span class="pill gray">灰云</span>'; }
+
+async function api(path, method='GET', body){
+  const opt = { method, headers:{} };
+  if(body!==undefined){ opt.headers['Content-Type']='application/json'; opt.body=JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  let data=null; try{ data=await r.json(); }catch(e){}
+  return { status:r.status, data };
+}
+
+async function boot_(){
+  const {data} = await api('/api/config');
+  boot = data;
+  editor = JSON.parse(JSON.stringify(data.config||{zones:[]}));
+  if(!editor.zones) editor.zones=[];
+  renderHeader();
+  renderEditor();
+  renderResultIdle();
+}
+
+function renderHeader(){
+  const tok = document.getElementById('tok');
+  tok.textContent = 'token: ' + (boot.has_token? '已配置' : '缺失');
+  tok.className = 'badge ' + (boot.has_token? 'green' : 'red');
+  document.getElementById('ver').textContent = 'v' + (boot.version||'?');
+  const d = boot.drift||[];
+  const db = document.getElementById('drift');
+  if(d.length){ db.textContent='漂移: '+d.length+' 处'; db.className='badge red'; }
+  else { db.textContent='漂移: 无'; db.className='badge green'; }
+  const a = boot.applied;
+  const ap = document.getElementById('applied');
+  if(a && a.generated_at){ ap.textContent='上次推送: '+a.version+' · '+a.generated_at.slice(0,19).replace('T',' '); ap.className='badge gray'; }
+  else { ap.textContent='上次推送: —'; ap.className='badge gray'; }
+}
+
+function renderEditor(){
+  const root = document.getElementById('editor');
+  if(!editor.zones.length){ root.innerHTML = '<p class="muted">配置为空。可在 <code>config.yaml</code> 中填写域名与解析，或点击下方「新增域名」。</p>'; }
+  root.innerHTML = editor.zones.map((z,zi)=>zoneHTML(z,zi)).join('') + '<button class="btn add-row" onclick="addZone()">+ 新增域名</button>';
+}
+
+function zoneHTML(z, zi){
+  const sslOpts = SSL_OPTS.map(o=>`<option value="${o}" ${z.ssl===o?'selected':''}>${o||'(默认)'}`) .join('');
+  const recs = (z.records||[]).map((r,ri)=>{
+    const typeOpts = TYPE_OPTS.map(t=>`<option value="${t}" ${(r.type||'').toUpperCase()===t?'selected':''}>${t}</option>`).join('');
+    const sslOptsR = SSL_OPTS.map(o=>`<option value="${o}" ${(r.ssl||'')===o?'selected':''}>${o||'—'}</option>`).join('');
+    return `<tr>
+      <td class="c-name"><input value="${esc(r.name)}" onchange="setRec(${zi},${ri},'name',this.value)"></td>
+      <td class="c-type"><select onchange="setRec(${zi},${ri},'type',this.value)">${typeOpts}</select></td>
+      <td><input value="${esc(r.content)}" onchange="setRec(${zi},${ri},'content',this.value)"></td>
+      <td class="c-ttl"><input type="number" value="${r.ttl||1}" onchange="setRec(${zi},${ri},'ttl',+this.value)"></td>
+      <td class="c-proxy"><select onchange="setRec(${zi},${ri},'proxy',this.value==='true')"><option value="true" ${r.proxy?'selected':''}>橙云</option><option value="false" ${!r.proxy?'selected':''}>灰云</option></select></td>
+      <td class="c-ssl"><select onchange="setRec(${zi},${ri},'ssl',this.value)">${sslOptsR}</select></td>
+      <td><input value="${esc(r.comment)}" placeholder="备注" onchange="setRec(${zi},${ri},'comment',this.value)"></td>
+      <td class="c-del"><button class="row-del" title="从配置移除（预览时会列为待删除）" onclick="delRec(${zi},${ri})">✕</button></td>
+    </tr>`;
+  }).join('');
+  return `<div class="zone">
+    <div class="zhead">
+      <input style="width:220px;font-weight:600" value="${esc(z.domain)}" onchange="setZone(${zi},'domain',this.value)" placeholder="域名 example.com">
+      <label class="muted">Zone SSL <select onchange="setZone(${zi},'ssl',this.value)">${sslOpts}</select></label>
+      <span class="grow"></span>
+      <button class="btn" onclick="addRec(${zi})">+ 记录</button>
+      <button class="btn danger" onclick="delZone(${zi})">删除域名</button>
+    </div>
+    <div class="zbody">
+      <table>
+        <thead><tr><th>名称</th><th>类型</th><th>内容</th><th>TTL</th><th>代理</th><th>按主机SSL</th><th>备注</th><th></th></tr></thead>
+        <tbody>${recs || '<tr><td colspan="8" class="muted">无记录</td></tr>'}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function setZone(zi,k,v){ editor.zones[zi][k]=v; }
+function setRec(zi,ri,k,v){ editor.zones[zi].records[ri][k]=v; }
+function addZone(){ editor.zones.push({domain:'',ssl:'',records:[]}); renderEditor(); }
+function delZone(zi){ editor.zones.splice(zi,1); renderEditor(); }
+function addRec(zi){ editor.zones[zi].records = editor.zones[zi].records||[]; editor.zones[zi].records.push({name:'',type:'A',content:'',proxy:false,ttl:1,comment:''}); renderEditor(); }
+function delRec(zi,ri){ editor.zones[zi].records.splice(ri,1); renderEditor(); }
+
+async function saveConfig(){
+  const {status,data} = await api('/api/config','PUT',editor);
+  if(status!==200){ showWarn('保存失败: '+(data&&data.error||status)); return false; }
+  toast('配置已保存'); return true;
+}
+
+function showWarn(msg){ const w=document.getElementById('warn'); w.style.display='block'; w.textContent=msg; }
+function hideWarn(){ document.getElementById('warn').style.display='none'; }
+
+async function doPull(){
+  hideWarn(); const {status,data}=await api('/api/pull','POST');
+  if(status!==200){ showWarn('拉取失败: '+(data&&data.error||status)); return; }
+  toast('已拉取 '+ (data.zones||0) +' 个域名');
+  await boot_();
+}
+
+async function doPlan(){
+  hideWarn();
+  if(!await saveConfig()) return;
+  const {status,data}=await api('/api/plan','POST');
+  if(status!==200){ showWarn('预览失败: '+(data&&data.error||status)); return; }
+  plan=data; renderResult(data, false);
+}
+
+async function doApply(){
+  hideWarn();
+  if(!await saveConfig()) return;
+  // 收集已勾选的待删除 ID
+  const ids = pending.filter(p=>p.checked).map(p=>p.id);
+  const {status,data}=await api('/api/apply','POST',{delete_ids:ids, delete_extra:false, confirmed:true});
+  if(status===409){
+    showWarn('存在未确认的待删除记录，请先逐条确认。');
+    pending = (data.pending_deletes||[]).map(p=>({...p, checked:false}));
+    renderConfirm(); renderResult(data,true); return;
+  }
+  if(status!==200){ showWarn('应用失败: '+(data&&data.error||status)); return; }
+  toast('已应用');
+  pending=[]; renderConfirm();
+  await boot_();
+  renderResult(data, true);
+}
+
+function renderResult(res, isApply){
+  const el = document.getElementById('result');
+  if(!res || !res.zones){ el.innerHTML='<p class="muted">无数据</p>'; return; }
+  let html = '';
+  pending = [];
+  for(const z of res.zones){
+    html += `<div class="diff"><span class="zone-title">■ ${esc(z.domain)}</span>\n`;
+    if(z.drift && z.drift.length){
+      html += `<span class="drift">⚠ 线上自上次推送后被外部改动 ${z.drift.length} 处（已基于最新现状重新对账）:</span>\n`;
+      for(const d of z.drift){ html += `<span class="drift">  · ${esc(d.type||z.domain)} ${esc(d.name)}: ${esc(d.old)} → ${esc(d.new)}</span>\n`; }
+    }
+    if(z.ssl_changed){ html += `<span class="ssl">  Zone SSL: ${esc(z.ssl_from)} → ${esc(z.ssl_to)}</span>\n`; }
+    for(const c of (z.changes||[])){
+      if(c.action==='ssl-zone'){ if(c.field) html+=`<span class="ssl">  ${esc(c.field)}</span>\n`; continue; }
+      if(c.action==='delete'){
+        pending.push({id:c.id, domain:c.domain, type:c.type, name:c.name, old:c.old, checked:false});
+        html += `<span class="del">  - ${esc(c.type)} ${esc(c.name)} (${esc(c.old)}) ${c.proxied?'[橙云]':''}</span>\n`;
+        continue;
+      }
+      if(c.action==='create'){
+        if(c.field){ html += `  <span class="add">${esc(c.field)}</span>\n`; }
+        else { html += `<span class="add">  + ${esc(c.type)} ${esc(c.name)} (${esc(c.new)}) ${c.proxied?'[橙云]':''}</span>\n`; }
+        continue;
+      }
+      if(c.action==='update'){
+        html += `<span class="add">  ~ ${esc(c.type)} ${esc(c.name)}: ${esc(c.old)} → ${esc(c.new)} ${c.proxied?'[橙云]':''}</span>\n`;
+        continue;
+      }
+      if(c.action==='ssl-host'){ html += `<span class="ssl">  · 按主机SSL ${esc(c.name)}: ${esc(c.old)} → ${esc(c.new)}</span>\n`; continue; }
+      html += `  ${esc(c.action)} ${esc(c.name)}: ${esc(c.old)} → ${esc(c.new)}\n`;
+    }
+    if(z.host_ssl_rules||z.host_ssl_other){ html += `  · 按主机SSL: ${z.host_ssl_rules} 条规则（保留其他用户规则 ${z.host_ssl_other} 条）\n`; }
+    if(!z.changed && (!z.drift||!z.drift.length)){ html += `  (无需变更)\n`; }
+    if(z.has_error){ html += `  <span class="del">!! 该域名处理出错</span>\n`; }
+    html += `</div>`;
+  }
+  if(isApply){
+    const drift = res.drift_detected? '；检测到漂移并已重新对账' : '';
+    html = `<p class="ok">应用完成${drift}。已写入 last_applied 基线。</p>` + html;
+  }
+  el.innerHTML = html;
+  renderConfirm();
+  updateApplyBtn();
+}
+
+function renderConfirm(){
+  const box = document.getElementById('confirm');
+  if(!pending.length){ box.style.display='none'; document.getElementById('btnApply').disabled=false; return; }
+  box.style.display='block';
+  const list = document.getElementById('confirmList');
+  list.innerHTML = '<ul>' + pending.map((p,i)=>`<li><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-i="${i}" onchange="togglePending(${i},this.checked)" style="width:auto"> ${esc(p.type)} ${esc(p.name)} — ${esc(p.old)}</label></li>`).join('') + '</ul>';
+  document.getElementById('confirmAll').onchange = (e)=>{ pending.forEach((p,i)=>{ p.checked=e.target.checked; }); renderConfirmChecks(); };
+  renderConfirmChecks();
+}
+
+function togglePending(i, v){ pending[i].checked=v; renderConfirmChecks(); }
+function renderConfirmChecks(){
+  document.querySelectorAll('#confirmList input[type=checkbox]').forEach((cb,i)=>{ cb.checked = pending[i].checked; });
+  const all = pending.every(p=>p.checked);
+  document.getElementById('confirmAll').checked = all;
+  updateApplyBtn();
+}
+function updateApplyBtn(){
+  const btn = document.getElementById('btnApply');
+  if(!pending.length){ btn.disabled=false; return; }
+  btn.disabled = !pending.every(p=>p.checked);
+}
+
+function renderResultIdle(){ document.getElementById('result').innerHTML='<p class="muted">尚未预览。修改配置后点「预览」查看 diff；确认无误再点「应用」。</p>'; }
+
+document.getElementById('btnPull').onclick = doPull;
+document.getElementById('btnPlan').onclick = doPlan;
+document.getElementById('btnApply').onclick = doApply;
+document.getElementById('btnSave').onclick = async ()=>{ hideWarn(); if(await saveConfig()) hideWarn(); };
+
+boot_();
+</script>
+</body>
+</html>

@@ -32,6 +32,8 @@ description: Use when managing Cloudflare DNS through the cfdns CLI — add/chan
    - **zone 级**（整域统一）：用 `cfdns ssl <zone> <mode>` 设置，mode ∈ `off | flexible | full | full_strict`（也接受 `flex`/`strict` 别名）。
    - **精确到主机**（如 `a.example.com` 临时 flexible）：在 `config.yaml` 该记录的 `ssl:` 字段声明。工具自动建一条带 `cfdns-perhost-ssl` 标签的 Cloudflare **Configuration Rule** 按主机名落地；**它只管自己建的、不碰你其他规则**。
 8. **绝不提交 `.token` 或真实 `config.yaml`**。它们位于 `~/.config/cfdns`（chmod 600/700），在仓库之外。
+9. **Web UI（`cfdns ui`）删除同样强制确认**：界面里"待删除"记录必须逐条勾选 + 主确认框打勾才会真正解绑；未确认则"应用"按钮禁用。NS 等受保护类型永不被删。**不要**为了"图省事"用 UI 的删除绕过 `--delete-extra` 的 `plan` 核对——UI 删除前也要先看预览里的待删除清单。
+10. **`apply`（CLI 与 UI 同）成功后写 `last_applied.json` 基线**：下次 `apply` 会先重新拉线上、与基线比对，发现外部漂移即告警并基于最新现状重新对账，绝不用过期缓存覆盖真实改动。agent 无需手动维护该文件。
 
 ## 命令一览
 
@@ -46,6 +48,7 @@ description: Use when managing Cloudflare DNS through the cfdns CLI — add/chan
 | `cfdns ssl <域名> <模式>` | 设 zone 级 SSL | 是 | 模式见上 |
 | `cfdns report [-out report.html]` | 由 `state.json` 生成 HTML 报告 | 否 | 反映线上现状，非配置 |
 | `cfdns gen-config [-set-a-ip IP] [-f]` | 由 `state.json` 反推 `config.yaml` | 否 | `-set-a-ip` 便于看 diff |
+| `cfdns ui [-port 17080]` | 本地 Web UI：可视化编辑/预览/应用（仅本机 127.0.0.1） | 写操作需 | 背后调用同一份 `engine.Reconcile`，与 CLI 行为一致 |
 | `cfdns version` | 版本号 | 否 | |
 
 全局可选 `-config <PATH>` 用于定位 `.token` 与 state 目录（大多数命令都支持）。
@@ -123,6 +126,7 @@ cfdns gen-config -f                          # 由现状反推真实 config.yaml
 | `~/.config/cfdns/config.yaml` | 期望状态（声明） |
 | `~/.config/cfdns/.token` | Cloudflare API Token（chmod 600，不进仓） |
 | `~/.config/cfdns/state.json` | 线上现状镜像（由 `pull` 写入，勿手改） |
+| `~/.config/cfdns/last_applied.json` | 上次成功 `apply` 推上去的基线（漂移检测用，勿手改） |
 | `~/.config/cfdns/report.html` | HTML 报告（由 `state.json` 生成，按域名 tab） |
 
 `apply` 之后若要报告体现改动，再跑一次 `cfdns report`（报告永远反映 `state.json`，不是 config）。

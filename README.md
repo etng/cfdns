@@ -34,6 +34,7 @@ cfdns version
 | `~/.config/cfdns/config.yaml` | 你的域名与解析声明（期望状态） |
 | `~/.config/cfdns/.token` | Cloudflare API Token（**单独存放，chmod 600，不进 config**） |
 | `~/.config/cfdns/state.json` | 线上现状的本地镜像（由 `pull` 写入） |
+| `~/.config/cfdns/last_applied.json` | 最后一次成功 `apply` 推上去的版本快照（基线，用于检测外部漂移） |
 | `~/.config/cfdns/report.html` | 由 `state.json` 生成的 HTML 报告 |
 
 可用环境变量 `CFDNS_HOME` 覆盖以上目录位置。
@@ -111,10 +112,30 @@ cfdns ssl example.com full|flexible|full_strict|off   # 设 zone 级 SSL
 
 ---
 
+## Web UI（本地可视化编辑）
+
+`cfdns ui` 在本地起一个 Web 界面，把「改配置 → 预览 → 应用」搬到浏览器里：可直接编辑每条记录的 内容 / 代理 / TTL / 备注 / 按主机 SSL，点「预览」看 diff（等同 `plan`），点「应用」推上线（等同 `apply`）。
+
+```bash
+cfdns ui                # 默认 http://127.0.0.1:17080 （仅本机，外网不可达）
+cfdns ui --port 18080   # 自定义端口
+```
+
+界面要点：
+
+- **仅绑定 `127.0.0.1`**，外网无法访问；token 只在后端磁盘读取，**绝不出现在任何 HTTP 响应**中。
+- **拉取 / 预览 / 应用** 三个按钮，背后调用与 CLI 完全相同的 `engine.Reconcile`，保证「界面点应用 = 命令行直接应用」。
+- **删除（解绑）是破坏性操作，默认不发生**：预览时若有「配置里没有、但线上还存在的记录」会列为「待删除」，必须逐条勾选 + 主确认框打勾后「应用」才会真正删除；未确认则「应用」按钮禁用。NS 等受保护类型永不被删。
+- **漂移防护**：每次 `apply` 成功后写入 `last_applied.json`（上次推送基线）。下次 `apply` 会先重新拉取线上现状，与基线比对——若发现 CF 自上次推送后被**外部改动**（如有人在后台手动改了记录），界面顶部会标红「漂移 N 处」，并基于最新现状重新对账后再写入，避免拿过期缓存覆盖真实改动。
+
+---
+
 ## 安全约定
 
 - 密钥单独存放于 `~/.config/cfdns/.token`（chmod 600），**绝不写进 `config.yaml`**。
 - **无密钥时只能 `report` 看本地现状**；任何写操作（`pull`/`plan`/`apply`/`proxy`/`ssl`/`status`）一律拒绝。这正是「有现状、没密钥就不能改」的防护。
+- **`apply` 成功后写 `last_applied.json` 基线**：下次 `apply` 会先重新拉线上、与基线比对，发现外部漂移即告警并基于最新现状重新对账，绝不用过期缓存覆盖真实改动。
+- **Web UI 仅绑 `127.0.0.1`**，token 只在后端读、绝不进响应；删除操作默认不生效，必须逐条确认 + 主确认框。
 
 ---
 
@@ -131,6 +152,7 @@ cfdns ssl example.com full|flexible|full_strict|off   # 设 zone 级 SSL
 | `cfdns apply [-zone 域名] [--delete-extra]` | 按配置对账写回线上 |
 | `cfdns proxy <域名> <子名> on\|off` | 单条切换橙云/灰云 |
 | `cfdns ssl <域名> <模式>` | 设 zone 级 SSL 模式 |
+| `cfdns ui [-port 端口]` | 本地 Web UI：可视化编辑 / 预览 / 应用（仅本机） |
 | `cfdns version` | 版本号 |
 
 ---
@@ -144,8 +166,10 @@ cfdns/
   cmd/cfdns/main.go     # CLI 入口与命令
   internal/cfapi/       # Cloudflare API 客户端与模型
   internal/config/      # 配置加载、密钥解析、名称归一化
-  internal/state/       # 本地状态结构
+  internal/state/       # 本地状态结构 (state.json + last_applied.json)
+  internal/engine/      # 对账核心: 漂移检测 / 删除闸门 / 复用 CLI 与 UI 的逻辑
   internal/report/      # HTML 报告生成
+  internal/ui/          # 本地 Web UI (ui.go + 嵌入的 ui.html)
 ```
 
 示例数据与开发者说明见上层目录 `../`（与 `cfdns/` 同级的 `sample_state.json`、`sample_report.html` 及开发者 README）。

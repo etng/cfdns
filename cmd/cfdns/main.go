@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
 
 	"cfdns/internal/cfapi"
 	"cfdns/internal/config"
+	"cfdns/internal/engine"
 	"cfdns/internal/report"
 	"cfdns/internal/state"
+	"cfdns/internal/ui"
 )
 
 // version 由构建时通过 -ldflags "-X main.version=..." 注入; 默认与最新 tag 对齐。
@@ -31,6 +31,7 @@ const sampleConfig = `# cfdns 配置
 #   cfdns report           # 看: 由 state.json 生成带域名 tab 的 HTML (无需密钥)
 #   cfdns plan             # 查: 预览 配置 vs 线上 的差异 (只读, 需密钥)
 #   cfdns apply            # 推: 按配置对账写回线上
+#   cfdns ui               # 启: 本地 Web UI, 可视化编辑/预览/应用
 # ─────────────────────────────────────────────
 default_ttl: 1
 
@@ -76,6 +77,8 @@ func main() {
 		cmdReport(args)
 	case "gen-config":
 		cmdGenConfig(args)
+	case "ui":
+		cmdUI(args)
 	case "version":
 		fmt.Printf("cfdns %s\n", version)
 	case "help", "-h", "--help":
@@ -144,7 +147,7 @@ func cmdPull(args []string) {
 		if err != nil {
 			ssl = ""
 		}
-		perHost := fetchPerHostSSL(client, z.ID)
+		perHost := engine.FetchPerHostSSL(adapter{client}, z.ID)
 		st.Zones = append(st.Zones, state.StateZone{Domain: z.Name, ZoneID: z.ID, SSL: ssl, PerHostSSL: perHost, Records: recs})
 		fmt.Printf("[%s] %d 条记录, SSL=%s, 按主机SSL规则 %d 条\n", z.Name, len(recs), ssl, len(perHost))
 	}
@@ -205,13 +208,16 @@ func cmdStatus(args []string) {
 		if err != nil {
 			ssl = ""
 		}
-		perHost := fetchPerHostSSL(client, zoneID)
+		perHost := engine.FetchPerHostSSL(adapter{client}, zoneID)
 		st.Zones = append(st.Zones, state.StateZone{Domain: domain, ZoneID: zoneID, SSL: ssl, PerHostSSL: perHost, Records: recs})
 		fmt.Printf("[%s] %d 条记录, SSL=%s, 按主机SSL规则 %d 条\n", domain, len(recs), ssl, len(perHost))
 	}
 	writeState(cfg.ConfigDir, st)
 	fmt.Printf("\n已写入状态: %s\n", statePath(cfg.ConfigDir))
 }
+
+// adapter 把 *cfapi.Client 适配为 engine.cfClient 接口。
+type adapter struct{ *cfapi.Client }
 
 // ─────────────────────────── plan / apply ───────────────────────────
 
@@ -229,151 +235,77 @@ func cmdApply(args []string, dryRun bool) {
 	token := requireToken(cfg)
 	client := cfapi.NewClient(token)
 
-	st := state.State{GeneratedAt: time.Now().Format(time.RFC3339)}
+	opts := engine.Options{
+		DryRun:      dryRun,
+		ZoneFilter:  *zoneFilter,
+		DeleteExtra: *deleteExtra,
+		ConfigDir:   cfg.ConfigDir,
+		Version:     version,
+	}
 	fmt.Println("[sync] 正在拉取线上现状...")
 
-	for _, zc := range cfg.Zones {
-		if *zoneFilter != "" && zc.Domain != *zoneFilter {
-			continue
-		}
-		zoneID, err := client.ZoneID(zc.Domain)
-		if err != nil {
-			fmt.Printf("[%s] 跳过: %v\n", zc.Domain, err)
-			continue
-		}
-		live, err := client.ListRecords(zoneID)
-		if err != nil {
-			fatal("[%s] 拉取记录失败: %v", zc.Domain, err)
-		}
-		liveSSL, err := client.GetSSL(zoneID)
-		if err != nil {
-			fmt.Printf("[%s] 读取SSL失败: %v (继续)\n", zc.Domain, err)
-		}
+	res, err := engine.Reconcile(adapter{client}, cfg, opts)
+	if err != nil {
+		fatal("%v", err)
+	}
 
-		desiredByKey := map[string][]desiredRec{}
-		desiredHostSSL := map[string]string{} // hostname -> 期望的 SSL 模式(来自记录的 ssl 字段)
-		for _, rc := range zc.Records {
-			if rc.SSL != "" {
-				if m := cfapi.SSLMode(rc.SSL); m != "" {
-					desiredHostSSL[config.Fqdn(rc.Name, zc.Domain)] = m
-				}
-			}
-			d, forced := config.NormalizeRecord(rc, zc.Domain, cfg.DefaultTTL)
-			key := strings.ToLower(d.Type + "\n" + d.Name)
-			desiredByKey[key] = append(desiredByKey[key], desiredRec{d, forced})
+	for _, zr := range res.Zones {
+		if zr.SSLChanged {
+			fmt.Printf("[%s] SSL: %s -> %s%s\n", zr.Domain, zr.SSLFrom, zr.SSLTo, dryRunNote(dryRun))
 		}
-		liveByKey := map[string][]cfapi.CfRecord{}
-		for _, r := range live {
-			key := strings.ToLower(r.Type + "\n" + r.Name)
-			liveByKey[key] = append(liveByKey[key], r)
-		}
-
-		sz := state.StateZone{Domain: zc.Domain, ZoneID: zoneID}
-		changed := false
-
-		// SSL (zone 级)
-		wantSSL := cfapi.SSLMode(zc.SSL)
-		if wantSSL != "" && liveSSL != "" && wantSSL != liveSSL {
-			fmt.Printf("[%s] SSL: %s -> %s%s\n", zc.Domain, liveSSL, wantSSL, dryRunNote(dryRun))
-			changed = true
-			if !dryRun {
-				if err := client.SetSSL(zoneID, wantSSL); err != nil {
-					fmt.Printf("  !! SSL 设置失败: %v\n", err)
-				}
-			}
-		}
-		sz.SSL = liveSSL
-		if !dryRun && wantSSL != "" && wantSSL != liveSSL {
-			if s, err := client.GetSSL(zoneID); err == nil {
-				sz.SSL = s
-			}
-		}
-
-		// 期望记录: 新建 / 更新
-		for _, key := range sortedKeys(desiredByKey) {
-			wants := desiredByKey[key]
-			haves := liveByKey[key]
-			for i := range wants {
-				d := wants[i].rec
-				if i < len(haves) {
-					h := haves[i]
-					if differ(h, d) {
-						fmt.Printf("[%s] ~ %s %s (%s -> %s) %s%s\n", zc.Domain, d.Type, d.Name, valOr(h.Content), valOr(d.Content), proxyTag(d.Proxied), dryRunNote(dryRun))
-						changed = true
-						if !dryRun {
-							d.ID = h.ID
-							if _, err := client.UpdateRecord(zoneID, d); err != nil {
-								fmt.Printf("  !! 更新失败: %v\n", err)
-							}
-						}
-					}
+		for _, c := range zr.Changes {
+			switch c.Action {
+			case "update":
+				fmt.Printf("[%s] ~ %s %s (%s -> %s) %s%s\n", c.Domain, c.Type, c.Name, valOr(c.Old), valOr(c.New), proxyTag(c.Proxied), dryRunNote(dryRun))
+			case "create":
+				if c.Field != "" {
+					fmt.Printf("  %s\n", c.Field)
 				} else {
-					fmt.Printf("[%s] + %s %s (%s) %s%s\n", zc.Domain, d.Type, d.Name, valOr(d.Content), proxyTag(d.Proxied), dryRunNote(dryRun))
-					if wants[i].forced {
-						fmt.Printf("  (注意: %s 类型不支持代理, 已强制为灰云)\n", d.Type)
-					}
-					changed = true
-					if !dryRun {
-						if _, err := client.CreateRecord(zoneID, d); err != nil {
-							fmt.Printf("  !! 创建失败: %v\n", err)
-						}
-					}
+					fmt.Printf("[%s] + %s %s (%s) %s%s\n", c.Domain, c.Type, c.Name, valOr(c.New), proxyTag(c.Proxied), dryRunNote(dryRun))
+				}
+			case "delete":
+				if c.Field != "" {
+					fmt.Printf("  %s\n", c.Field)
+				} else {
+					fmt.Printf("[%s] - %s %s (%s) %s%s\n", c.Domain, c.Type, c.Name, valOr(c.Old), proxyTag(c.Proxied), dryRunNote(dryRun))
+				}
+			case "ssl-zone":
+				if c.Field != "" {
+					fmt.Printf("  %s\n", c.Field)
 				}
 			}
 		}
-
-		// 多余记录: 删除 (仅 --delete-extra)
-		for key, haves := range liveByKey {
-			if _, ok := desiredByKey[key]; ok {
-				wants := desiredByKey[key]
-				for i := len(wants); i < len(haves); i++ {
-					h := haves[i]
-					fmt.Printf("[%s] - %s %s (%s) %s%s\n", zc.Domain, h.Type, h.Name, valOr(h.Content), proxyTag(h.Proxied), dryRunNote(dryRun))
-					changed = true
-					if !dryRun && *deleteExtra && !isProtected(h.Type) {
-						if err := client.DeleteRecord(zoneID, h.ID); err != nil {
-							fmt.Printf("  !! 删除失败: %v\n", err)
-						}
-					}
-				}
-				continue
-			}
-			for _, h := range haves {
-				fmt.Printf("[%s] - %s %s (%s) %s%s\n", zc.Domain, h.Type, h.Name, valOr(h.Content), proxyTag(h.Proxied), dryRunNote(dryRun))
-				changed = true
-				if !dryRun && *deleteExtra && !isProtected(h.Type) {
-					if err := client.DeleteRecord(zoneID, h.ID); err != nil {
-						fmt.Printf("  !! 删除失败: %v\n", err)
-					}
-				}
+		if zr.HostSSLRules > 0 || zr.HostSSLOther > 0 {
+			fmt.Printf("[%s] 按主机SSL: 目标 %d 条规则 (保留其他用户规则 %d 条)%s\n", zr.Domain, zr.HostSSLRules, zr.HostSSLOther, dryRunNote(dryRun))
+		}
+		if len(zr.Drift) > 0 {
+			fmt.Printf("[%s] ⚠️ 检测到线上自上次推送后被外部改动(%d 处), 已基于最新现状重新对账:\n", zr.Domain, len(zr.Drift))
+			for _, d := range zr.Drift {
+				fmt.Printf("    · %s %s: %s -> %s\n", d.Type, d.Name, valOr(d.Old), valOr(d.New))
 			}
 		}
-
-		// 按具体域名的 SSL (通过 Configuration Rules 落地)
-		applyPerHostSSL(client, zoneID, zc.Domain, desiredHostSSL, zc.SSL, dryRun)
-
-		if dryRun {
-			sz.Records = live
-		} else {
-			if fresh, err := client.ListRecords(zoneID); err == nil {
-				sz.Records = fresh
-			} else {
-				sz.Records = live
-			}
-			if ph := fetchPerHostSSL(client, zoneID); len(ph) > 0 {
-				sz.PerHostSSL = ph
-			}
-		}
-		st.Zones = append(st.Zones, sz)
-		if !changed {
-			fmt.Printf("[%s] 无需变更\n", zc.Domain)
+		if !zr.Changed && len(zr.Drift) == 0 {
+			fmt.Printf("[%s] 无需变更\n", zr.Domain)
 		}
 	}
 
 	if dryRun {
 		fmt.Println("\n(以上为预览, 未做任何改动。确认无误后执行: cfdns apply)")
+		return
+	}
+
+	hasErr := false
+	for _, zr := range res.Zones {
+		if zr.HasError {
+			hasErr = true
+		}
+	}
+	if hasErr {
+		fmt.Println("\n!! 应用过程中出现错误, 未更新 last_applied 基线(请修复后重试)")
+	}
+	if err := engine.WriteState(cfg.ConfigDir, version, res); err != nil {
+		fmt.Printf("!! 写状态失败: %v\n", err)
 	} else {
-		writeState(cfg.ConfigDir, st)
 		fmt.Printf("\n已写入状态: %s\n生成报告: cfdns report\n", statePath(cfg.ConfigDir))
 	}
 }
@@ -565,6 +497,19 @@ func cmdGenConfig(args []string) {
 	fmt.Printf(")\n")
 }
 
+// ─────────────────────────── ui ───────────────────────────
+
+func cmdUI(args []string) {
+	fs := flag.NewFlagSet("ui", flag.ExitOnError)
+	port := fs.String("port", "17080", "监听端口(仅绑定 127.0.0.1, 外网不可达)")
+	fs.Parse(args)
+	addr := "127.0.0.1:" + *port
+	fmt.Printf("cfdns ui 已启动: http://%s\n(仅本机可访问, Ctrl+C 退出)\n", addr)
+	if err := ui.Serve(addr, version); err != nil {
+		fatal("%v", err)
+	}
+}
+
 // ─────────────────────────── 辅助 ───────────────────────────
 
 func fatal(format string, a ...interface{}) {
@@ -608,37 +553,6 @@ func dryRunNote(d bool) string {
 		return " (预览)"
 	}
 	return ""
-}
-
-func sortedKeys[T any](m map[string][]T) []string {
-	ks := make([]string, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks)
-	return ks
-}
-
-func isProtected(t string) bool {
-	switch strings.ToUpper(t) {
-	case "NS":
-		return true
-	}
-	return false
-}
-
-func differ(h cfapi.CfRecord, d cfapi.CfRecord) bool {
-	if h.Content != d.Content {
-		return true
-	}
-	if h.Proxied != d.Proxied {
-		return true
-	}
-	// ttl=1 在 CF 中表示"自动", 与配置的默认 1 视为等价
-	if h.TTL != d.TTL && !(h.TTL == 1 || d.TTL == 1) {
-		return true
-	}
-	return false
 }
 
 func proxyLabel(p bool) string {
@@ -696,7 +610,7 @@ func computeDiff(cfg *config.Config, st state.State) []report.ZoneDiff {
 			key := strings.ToLower(r.Type + "\n" + r.Name)
 			liveByKey[key] = append(liveByKey[key], r)
 		}
-		for _, key := range sortedKeys(desiredByKey) {
+		for _, key := range engine.SortedKeys(desiredByKey) {
 			wants := desiredByKey[key]
 			haves := liveByKey[key]
 			for i := range wants {
@@ -737,95 +651,6 @@ func computeDiff(cfg *config.Config, st state.State) []report.ZoneDiff {
 	return out
 }
 
-// hostFromExpr 从 Configuration Rule 表达式解析出主机名, 支持:
-//   http.host eq "a.example.com"
-//   http.host matches "*.example.com"
-func hostFromExpr(expr string) string {
-	re := regexp.MustCompile(`http\.host\s+(?:eq|matches)\s+"([^"]+)"`)
-	if m := re.FindStringSubmatch(expr); m != nil {
-		return m[1]
-	}
-	return ""
-}
-
-// fetchPerHostSSL 读取该 zone 的按主机名 SSL 规则(Configuration Rules),
-// 返回 hostname -> ssl 模式 的映射。拉取失败(如权限不足)时返回空映射, 不影响主流程。
-func fetchPerHostSSL(client *cfapi.Client, zoneID string) map[string]string {
-	m := map[string]string{}
-	rs, err := client.GetEntrypoint(zoneID)
-	if err != nil {
-		return m
-	}
-	for _, r := range rs.Rules {
-		if ssl, ok := r.ActionParameters["ssl"].(string); ok && ssl != "" {
-			if host := hostFromExpr(r.Expression); host != "" {
-				m[host] = ssl
-			}
-		}
-	}
-	return m
-}
-
-const ruleTag = "cfdns-perhost-ssl"
-
-// applyPerHostSSL 通过 Configuration Rules 落实「按具体域名(主机名)的 SSL 模式」。
-// 仅管理 description 以 ruleTag 开头的规则, 不触碰用户其他的 Configuration Rules。
-// dryRun 时只打印意图, 不写。
-func applyPerHostSSL(client *cfapi.Client, zoneID, zoneDomain string, desired map[string]string, zoneSSL string, dryRun bool) {
-	if len(desired) == 0 {
-		return
-	}
-	zoneMode := cfapi.SSLMode(zoneSSL)
-	rs, _ := client.GetEntrypoint(zoneID)
-	var ours, theirs []cfapi.CfRule
-	for _, r := range rs.Rules {
-		if strings.HasPrefix(r.Description, ruleTag) {
-			ours = append(ours, r)
-		} else {
-			theirs = append(theirs, r)
-		}
-	}
-	newOurs := []cfapi.CfRule{}
-	for host, mode := range desired {
-		if mode == zoneMode {
-			continue // 与 zone 级一致, 无需单独规则
-		}
-		nr := cfapi.CfRule{
-			Action:          "set_config",
-			Expression:      fmt.Sprintf("http.host eq %q", host),
-			Description:     ruleTag + " " + host,
-			ActionParameters: map[string]interface{}{"ssl": mode},
-		}
-		for i := range ours {
-			if hostFromExpr(ours[i].Expression) == host {
-				nr.ID = ours[i].ID
-				nr.Version = ours[i].Version
-				break
-			}
-		}
-		newOurs = append(newOurs, nr)
-	}
-	all := append(theirs, newOurs...)
-	fmt.Printf("[%s] 按主机SSL: 目标 %d 条规则 (保留其他用户规则 %d 条)%s\n", zoneDomain, len(newOurs), len(theirs), dryRunNote(dryRun))
-	if !dryRun {
-		var err error
-		if rs.ID != "" {
-			err = client.PutEntrypoint(zoneID, cfapi.CfRuleset{ID: rs.ID, Name: rs.Name, Kind: "zone", Phase: "http_config_settings", Rules: all})
-		} else {
-			err = client.PostEntrypoint(zoneID, cfapi.CfRuleset{Name: "Configuration Rules", Kind: "zone", Phase: "http_config_settings", Rules: all})
-		}
-		if err != nil {
-			fmt.Printf("  !! 写入按主机SSL规则失败: %v\n", err)
-		}
-	}
-}
-
-// desiredRec 是配置归一化后的期望记录
-type desiredRec struct {
-	rec    cfapi.CfRecord
-	forced bool // 该类型本不支持代理, 被强制为灰云
-}
-
 func usage() {
 	fmt.Print(`cfdns - Cloudflare DNS 配置驱动管理工具
 
@@ -839,6 +664,7 @@ func usage() {
   cfdns apply [-zone 域名] [-delete-extra]    推: 按配置对账(建/改/删 + 设 SSL)
   cfdns proxy <域名> <子名> on|off            单条切换橙云/灰云
   cfdns ssl   <域名> <off|flexible|full|full_strict>  设该域名(zone) SSL 模式
+  cfdns ui    [-port 17080]                   启: 本地 Web UI (编辑/预览/应用, 仅本机)
   cfdns version
 
 SSL 模式说明:
@@ -850,6 +676,8 @@ SSL 模式说明:
 安全约定:
   - 密钥单独存放于 ~/.config/cfdns/.token (chmod 600), 不写进 config.yaml
   - 无密钥时仅 report 可查看本地现状, 任何写操作(pull/plan/apply/proxy/ssl/status)一律拒绝
+  - apply 成功后写入 last_applied.json 作为基线; 下次 apply 若发现线上被外部改动会自动告警并重新对账
+  - Web UI 仅绑定 127.0.0.1, token 只在后端读取, 绝不出现在任何 HTTP 响应中
 
 配置目录: ~/.config/cfdns/  (可用环境变量 CFDNS_HOME 覆盖)
 `)
