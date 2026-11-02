@@ -18,7 +18,7 @@ import (
 )
 
 // version 由构建时通过 -ldflags "-X main.version=..." 注入; 默认与最新 tag 对齐。
-var version = "0.1.0"
+var version = "0.1.1"
 
 const sampleConfig = `# cfdns 配置
 # ─────────────────────────────────────────────
