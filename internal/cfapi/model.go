@@ -20,7 +20,7 @@ type cfError struct {
 	Message string `json:"message"`
 }
 
-type cfZone struct {
+type CfZone struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Status string `json:"status"`

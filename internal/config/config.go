@@ -135,6 +135,11 @@ func ShortName(name, domain string) string {
 // proxiable 记录哪些类型支持橙云代理
 var proxiable = map[string]bool{"A": true, "AAAA": true, "CNAME": true}
 
+// Proxiable 判断记录类型是否支持橙云代理(供 CLI 快捷命令 set 判定默认代理)
+func Proxiable(t string) bool {
+	return proxiable[strings.ToUpper(t)]
+}
+
 // NormalizeRecord 把配置记录归一化为 CF 记录; 不支持代理的类型会被强制为灰云(并返回 forced=true)
 func NormalizeRecord(r RecordConfig, domain string, defaultTTL int) (cfapi.CfRecord, bool) {
 	p := r.Proxy

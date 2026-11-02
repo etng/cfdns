@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -60,7 +61,7 @@ func (c *Client) do(method, path string, body interface{}, out interface{}) erro
 }
 
 func (c *Client) ZoneID(domain string) (string, error) {
-	var zones []cfZone
+	var zones []CfZone
 	if err := c.do("GET", "/zones?name="+domain, nil, &zones); err != nil {
 		return "", err
 	}
@@ -71,12 +72,59 @@ func (c *Client) ZoneID(domain string) (string, error) {
 }
 
 // ListZones 列出 token 可访问的全部 zone
-func (c *Client) ListZones() ([]cfZone, error) {
-	var zs []cfZone
+func (c *Client) ListZones() ([]CfZone, error) {
+	var zs []CfZone
 	if err := c.do("GET", "/zones", nil, &zs); err != nil {
 		return nil, err
 	}
 	return zs, nil
+}
+
+// MatchZone 由完整域名(fqdn)在给定 zone 列表中找出所属 zone (最长后缀匹配)。
+// subName 为该记录在 zone 内的相对名: fqdn 等于 zone 名时为 "@"(apex), 否则为剥掉 ".zone" 后缀的部分。
+// 仅匹配 status 为 active 的 zone; 未命中返回 error。纯函数, 便于测试。
+func MatchZone(fqdn string, zones []CfZone) (CfZone, string, error) {
+	f := strings.ToLower(strings.TrimSuffix(fqdn, "."))
+	best := ""
+	for _, z := range zones {
+		name := strings.ToLower(z.Name)
+		if z.Status != "active" {
+			continue
+		}
+		if name == f || strings.HasSuffix(f, "."+name) {
+			if len(name) > len(best) {
+				best = name
+			}
+		}
+	}
+	if best == "" {
+		return CfZone{}, "", fmt.Errorf("找不到 %s 归属的 zone（检查 token 权限或域名是否已接入 CF）", fqdn)
+	}
+	var z CfZone
+	for _, zz := range zones {
+		if strings.EqualFold(zz.Name, best) {
+			z = zz
+			break
+		}
+	}
+	sub := "@"
+	if f != best {
+		sub = strings.TrimSuffix(f, "."+best)
+	}
+	return z, sub, nil
+}
+
+// ResolveZone 由完整域名(fqdn)自动判定所属 zone, 返回 zoneID / zone 名 / 记录相对名。
+func (c *Client) ResolveZone(fqdn string) (zoneID, zoneName, subName string, err error) {
+	zones, err := c.ListZones()
+	if err != nil {
+		return "", "", "", err
+	}
+	z, sub, err := MatchZone(fqdn, zones)
+	if err != nil {
+		return "", "", "", err
+	}
+	return z.ID, z.Name, sub, nil
 }
 
 func (c *Client) ListRecords(zoneID string) ([]CfRecord, error) {

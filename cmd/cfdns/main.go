@@ -73,6 +73,10 @@ func main() {
 		cmdProxy(args)
 	case "ssl":
 		cmdSSL(args)
+	case "set":
+		cmdSet(args)
+	case "unset":
+		cmdUnset(args)
 	case "report":
 		cmdReport(args)
 	case "gen-config":
@@ -393,6 +397,123 @@ func cmdSSL(args []string) {
 	fmt.Printf("[%s] SSL 模式已设为 %s\n", domain, mode)
 }
 
+// ─────────────────────────── set / unset ───────────────────────────
+// set / unset 是「直连 Cloudflare」的单条快捷命令, 沿用 proxy/ssl 的范式:
+// 不依赖 config.yaml 里声明的 zone, 而是由完整域名(FQDN)自动判定所属 zone。
+// 它们直接读写 CF, 不会修改本地 config.yaml / state.json —— 之后用 pull 同步即可。
+
+// dnsClient 是 set/unset 编排所依赖的最小客户端接口, 便于用 fake 做单测。
+type dnsClient interface {
+	ListZones() ([]cfapi.CfZone, error)
+	ListRecords(zoneID string) ([]cfapi.CfRecord, error)
+	CreateRecord(zoneID string, r cfapi.CfRecord) (*cfapi.CfRecord, error)
+	UpdateRecord(zoneID string, r cfapi.CfRecord) (*cfapi.CfRecord, error)
+	DeleteRecord(zoneID, recordID string) error
+}
+
+// setRecord 在指定 zone 内把 typ+fqdn 对应记录设为 value(备注 comment); 不存在则创建, 存在则更新。
+// 默认: A/AAAA/CNAME 为橙云(走 CF 代理), 其余类型为灰云; --gray 可强制灰云。
+func setRecord(c dnsClient, zoneID, zoneName, subName, typ, value, comment string, gray bool, ttl int) error {
+	target := config.Fqdn(subName, zoneName)
+	recs, err := c.ListRecords(zoneID)
+	if err != nil {
+		return fmt.Errorf("列记录失败: %w", err)
+	}
+	var existing *cfapi.CfRecord
+	for i := range recs {
+		if strings.EqualFold(recs[i].Type, typ) && strings.EqualFold(recs[i].Name, target) {
+			existing = &recs[i]
+			break
+		}
+	}
+	proxied := !gray && config.Proxiable(typ)
+	rec := cfapi.CfRecord{Type: strings.ToUpper(typ), Name: target, Content: value, Proxied: proxied, TTL: ttl, Comment: comment}
+	if existing == nil {
+		if _, err := c.CreateRecord(zoneID, rec); err != nil {
+			return fmt.Errorf("创建失败: %w", err)
+		}
+		fmt.Printf("[%s] 新建 %s %s -> %s (代理:%s)\n", zoneName, strings.ToUpper(typ), target, value, proxyLabel(proxied))
+		return nil
+	}
+	rec.ID = existing.ID
+	if _, err := c.UpdateRecord(zoneID, rec); err != nil {
+		return fmt.Errorf("更新失败: %w", err)
+	}
+	fmt.Printf("[%s] 更新 %s %s -> %s (代理:%s)\n", zoneName, strings.ToUpper(typ), target, value, proxyLabel(proxied))
+	return nil
+}
+
+// unsetRecord 删除指定 zone 内 typ+fqdn 对应记录; 不存在视为无需删除。
+func unsetRecord(c dnsClient, zoneID, zoneName, subName, typ string) error {
+	target := config.Fqdn(subName, zoneName)
+	recs, err := c.ListRecords(zoneID)
+	if err != nil {
+		return fmt.Errorf("列记录失败: %w", err)
+	}
+	var existing *cfapi.CfRecord
+	for i := range recs {
+		if strings.EqualFold(recs[i].Type, typ) && strings.EqualFold(recs[i].Name, target) {
+			existing = &recs[i]
+			break
+		}
+	}
+	if existing == nil {
+		fmt.Printf("[%s] 未找到 %s %s, 无需删除\n", zoneName, strings.ToUpper(typ), target)
+		return nil
+	}
+	if err := c.DeleteRecord(zoneID, existing.ID); err != nil {
+		return fmt.Errorf("删除失败: %w", err)
+	}
+	fmt.Printf("[%s] 已删除 %s %s (%s)\n", zoneName, strings.ToUpper(typ), target, existing.Content)
+	return nil
+}
+
+// quickClientAndZone 仅用 token(不依赖 config.yaml) 构造客户端并解析 fqdn 归属的 zone。
+func quickClientAndZone(fqdn string) (*cfapi.Client, string, string, string) {
+	token, err := (&config.Config{ConfigDir: config.DefaultConfigDir()}).ResolveToken()
+	if err != nil {
+		fatal("%v", err)
+	}
+	client := cfapi.NewClient(token)
+	zoneID, zoneName, subName, err := client.ResolveZone(fqdn)
+	if err != nil {
+		fatal("%v", err)
+	}
+	return client, zoneID, zoneName, subName
+}
+
+func cmdSet(args []string) {
+	fs := flag.NewFlagSet("set", flag.ExitOnError)
+	gray := fs.Bool("gray", false, "灰云(纯 DNS, 不走 CF 代理); 默认 A/AAAA/CNAME 为橙云")
+	ttl := fs.Int("ttl", 1, "TTL, 1 表示自动(Auto)")
+	fs.Parse(args)
+	if fs.NArg() < 3 {
+		fatal("用法: cfdns set <TYPE> <FQDN> <VALUE> [备注...]\n示例: cfdns set A abc.mayicj.com 1.2.3.4 我的备注")
+	}
+	typ := fs.Arg(0)
+	fqdn := fs.Arg(1)
+	value := fs.Arg(2)
+	comment := strings.Join(fs.Args()[3:], " ")
+	client, zoneID, zoneName, subName := quickClientAndZone(fqdn)
+	if err := setRecord(client, zoneID, zoneName, subName, typ, value, comment, *gray, *ttl); err != nil {
+		fatal("%v", err)
+	}
+}
+
+func cmdUnset(args []string) {
+	fs := flag.NewFlagSet("unset", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() < 2 {
+		fatal("用法: cfdns unset <TYPE> <FQDN>\n示例: cfdns unset A abc.mayicj.com")
+	}
+	typ := fs.Arg(0)
+	fqdn := fs.Arg(1)
+	client, zoneID, zoneName, subName := quickClientAndZone(fqdn)
+	if err := unsetRecord(client, zoneID, zoneName, subName, typ); err != nil {
+		fatal("%v", err)
+	}
+}
+
 // ─────────────────────────── report ───────────────────────────
 
 func cmdReport(args []string) {
@@ -664,6 +785,8 @@ func usage() {
   cfdns apply [-zone 域名] [-delete-extra]    推: 按配置对账(建/改/删 + 设 SSL)
   cfdns proxy <域名> <子名> on|off            单条切换橙云/灰云
   cfdns ssl   <域名> <off|flexible|full|full_strict>  设该域名(zone) SSL 模式
+  cfdns set   <TYPE> <FQDN> <VALUE> [备注...]  直连 CF 设置一条解析(自动判定 zone)
+  cfdns unset <TYPE> <FQDN>                   直连 CF 删除一条解析(自动判定 zone)
   cfdns ui    [-port 17080]                   启: 本地 Web UI (编辑/预览/应用, 仅本机)
   cfdns version
 
@@ -675,7 +798,7 @@ SSL 模式说明:
 
 安全约定:
   - 密钥单独存放于 ~/.config/cfdns/.token (chmod 600), 不写进 config.yaml
-  - 无密钥时仅 report 可查看本地现状, 任何写操作(pull/plan/apply/proxy/ssl/status)一律拒绝
+  - 无密钥时仅 report 可查看本地现状, 任何写操作(pull/plan/apply/proxy/ssl/set/unset/status)一律拒绝
   - apply 成功后写入 last_applied.json 作为基线; 下次 apply 若发现线上被外部改动会自动告警并重新对账
   - Web UI 仅绑定 127.0.0.1, token 只在后端读取, 绝不出现在任何 HTTP 响应中
 

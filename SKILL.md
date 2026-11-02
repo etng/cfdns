@@ -35,6 +35,7 @@ description: Use when managing Cloudflare DNS through the cfdns CLI — add/chan
 9. **Web UI（`cfdns ui`）删除同样强制确认**：界面里"待删除"记录必须逐条勾选 + 主确认框打勾才会真正解绑；未确认则"应用"按钮禁用。NS 等受保护类型永不被删。**不要**为了"图省事"用 UI 的删除绕过 `--delete-extra` 的 `plan` 核对——UI 删除前也要先看预览里的待删除清单。
 10. **`apply`（CLI 与 UI 同）成功后写 `last_applied.json` 基线**：下次 `apply` 会先重新拉线上、与基线比对，发现外部漂移即告警并基于最新现状重新对账，绝不用过期缓存覆盖真实改动。agent 无需手动维护该文件。
 11. **版本快照可回退**：每次成功 `apply` 还会在 `versions.json` 追加一份版本（完整线上状态 + 变更记录）。若这次改错了，用 `cfdns ui` 顶栏「版本」→「回退到此版本」把该版本状态恢复到本地 `config.yaml`，再 `plan` 核对、`apply` 推回线上。**回退只改本地配置、不立即动线上**，所以是可逆的安全操作。
+12. **`set` / `unset` 是直连 Cloudflare 的快捷命令**：由 FQDN 自动判定 zone（最长后缀匹配、仅 active zone），不读 `config.yaml`、不修改本地状态。执行前先确认 FQDN 解析出的 zone 与子域名符合预期（命令输出会打印 `[zone] 新建/更新/删除 TYPE fqdn`）。改完线上后建议 `cfdns pull` 同步本地镜像。
 
 ## 命令一览
 
@@ -47,6 +48,8 @@ description: Use when managing Cloudflare DNS through the cfdns CLI — add/chan
 | `cfdns apply [-zone 域名] [--delete-extra]` | 按配置对账写回线上 | 是 | 默认不删；`--delete-extra` 整批解绑 |
 | `cfdns proxy <域名> <子名> on\|off` | 单条切换橙云/灰云 | 是 | 子名 `@` 表示根 |
 | `cfdns ssl <域名> <模式>` | 设 zone 级 SSL | 是 | 模式见上 |
+| `cfdns set <TYPE> <FQDN> <VALUE> [备注...]` | 直连 CF 设置/更新一条解析 | 是 | 按 FQDN 自动判定 zone；`--gray` 灰云、`--ttl N` 默认 1=自动；额外参数即备注 |
+| `cfdns unset <TYPE> <FQDN>` | 直连 CF 删除一条解析 | 是 | 找不到对应记录视为无需删除 |
 | `cfdns report [-out report.html]` | 由 `state.json` 生成 HTML 报告 | 否 | 反映线上现状，非配置 |
 | `cfdns gen-config [-set-a-ip IP] [-f]` | 由 `state.json` 反推 `config.yaml` | 否 | `-set-a-ip` 便于看 diff |
 | `cfdns ui [-port 17080]` | 本地 Web UI：可视化编辑/预览/应用（仅本机 127.0.0.1） | 写操作需 | 背后调用同一份 `engine.Reconcile`，与 CLI 行为一致 |
@@ -83,6 +86,14 @@ cfdns proxy example.com @ on
 **设整域 SSL 模式**
 ```bash
 cfdns ssl example.com full          # 也可用 flexible / full_strict / off
+```
+
+**快速设置/删除单条解析（按 FQDN 自动判定 zone，无需 config）**
+```bash
+cfdns set A abc.mayicj.com 1.2.3.4            # 自动归属 mayicj.com 的 abc 这条 A 记录
+cfdns set A abc.mayicj.com 1.2.3.4 我的备注    # 末尾多余参数为备注
+cfdns set A abc.mayicj.com 1.2.3.4 --gray      # --gray 强制灰云；默认 A/AAAA/CNAME 为橙云
+cfdns unset A abc.mayicj.com                   # 删除该条 A 记录
 ```
 
 **给某个具体主机临时设 SSL（如 a.example.com 临时 flexible）**

@@ -96,6 +96,26 @@ cfdns proxy example.com www on|off                    # 单条切换橙云/灰�
 cfdns ssl example.com full|flexible|full_strict|off   # 设 zone 级 SSL
 ```
 
+### 快速设置单条解析（按 FQDN 自动判定 zone）
+
+不想写 `config.yaml` 也想立刻改一条解析时，用 `set` / `unset` 直连 Cloudflare，工具会根据完整域名（FQDN）自动判定它属于哪个 zone，无需在配置里声明该域名：
+
+```bash
+cfdns set A abc.mayicj.com 1.2.3.4               # 把 mayicj.com 的 abc 这条 A 记录设为 1.2.3.4 (自动判定 zone)
+cfdns set A abc.mayicj.com 1.2.3.4 我的备注       # 末尾多余参数即备注
+cfdns set A abc.mayicj.com 1.2.3.4 --gray         # --gray 强制灰云(纯 DNS); 默认 A/AAAA/CNAME 为橙云
+cfdns set A abc.mayicj.com 1.2.3.4 --ttl 300      # --ttl 指定 TTL, 默认 1=自动
+cfdns unset A abc.mayicj.com                      # 删除该条 A 记录 (无需值参数)
+```
+
+要点：
+
+- **自动判定 zone**：`abc.mayicj.com` → 自动归属 `mayicj.com` 这个 zone、记录名为 `abc`；多级子域（`a.b.mayicj.com`）也能正确归属，并取「最长后缀匹配」（如 `x.sub.mayicj.com` 命中 `sub.mayicj.com`）。仅匹配 `active` 状态的 zone。
+- **set = 创建或更新**：线上已存在同类型同名的记录则更新，否则新建；值、备注、代理、TTL 一并写入。
+- **unset = 删除**：找不到对应记录时视为「无需删除」，不会报错。
+- **直连 CF、不碰本地配置**：`set` / `unset` 与 `proxy` / `ssl` 同范式——直接读写 Cloudflare，不修改 `config.yaml` / `state.json`。执行后想让本地镜像同步，跑一次 `cfdns pull` 即可。
+- 只要 token 可用（`.token` 或 `CF_API_TOKEN`）即可使用，**不要求 `config.yaml` 存在**。
+
 ---
 
 ## 报告（HTML）
@@ -158,6 +178,8 @@ cfdns ui --port 18080   # 自定义端口
 | `cfdns apply [-zone 域名] [--delete-extra]` | 按配置对账写回线上 |
 | `cfdns proxy <域名> <子名> on\|off` | 单条切换橙云/灰云 |
 | `cfdns ssl <域名> <模式>` | 设 zone 级 SSL 模式 |
+| `cfdns set <TYPE> <FQDN> <VALUE> [备注...]` | 直连 CF 设置/更新一条解析（自动判定 zone） |
+| `cfdns unset <TYPE> <FQDN>` | 直连 CF 删除一条解析（自动判定 zone） |
 | `cfdns ui [-port 端口]` | 本地 Web UI：可视化编辑 / 预览 / 应用（仅本机） |
 | `cfdns version` | 版本号 |
 
